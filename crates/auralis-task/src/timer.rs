@@ -57,8 +57,8 @@ impl Future for SleepFuture {
         let now = executor::current_time_ms();
         self.deadline_ms = now.saturating_add(self.duration_ms);
 
-        // If the deadline has already passed (e.g. Duration::ZERO),
-        // return immediately without scheduling a timer.
+        // Return immediately for zero-duration sleeps or when the
+        // deadline has already passed (a TimeSource advanced past it).
         if self.duration_ms == 0 || (now > 0 && self.deadline_ms <= now) {
             return Poll::Ready(());
         }

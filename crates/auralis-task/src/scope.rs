@@ -1569,4 +1569,51 @@ mod tests {
         Executor::flush_instance(&ex);
         assert!(done.get());
     }
+
+    #[test]
+    fn set_deferred_routes_to_instance_executor() {
+        init();
+        let ex = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex, Rc::new(TestScheduleFlush));
+
+        let sig = Signal::new(0);
+        let s = sig.clone();
+
+        // Spawn a task on the instance executor that uses set_deferred.
+        Executor::spawn(&ex, async move {
+            crate::set_deferred(&s, 42);
+        });
+
+        // Flush the instance executor — set_deferred should route here.
+        Executor::flush_instance(&ex);
+        // The deferred set should have been processed.
+        assert_eq!(sig.read(), 42);
+    }
+
+    #[test]
+    fn notify_signal_state_follow_up_handles_reentrant_dirty() {
+        // When a signal subscriber callback calls set() on the same
+        // signal, the follow-up notification must fire correctly.
+        let sig = Signal::new(0);
+        let sig2 = sig.clone();
+        let count = Rc::new(Cell::new(0u32));
+        let c = Rc::clone(&count);
+
+        auralis_signal::subscribe(
+            &sig,
+            Rc::new(move || {
+                c.set(c.get() + 1);
+                // Re-entrant set: should be picked up by follow-up.
+                if c.get() == 1 {
+                    sig2.set(2);
+                }
+            }),
+        );
+
+        sig.set(1);
+        // First callback (set 1): count=1, triggers re-entrant set(2).
+        // Follow-up notification fires second callback: count=2.
+        assert_eq!(sig.read(), 2);
+        assert_eq!(count.get(), 2);
+    }
 }

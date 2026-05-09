@@ -854,6 +854,9 @@ pub(crate) fn current_time_ms() -> u64 {
 // Helpers — use thread_local EXECUTOR
 // ---------------------------------------------------------------------------
 
+/// Drain wakes that were buffered into [`PENDING_WAKES`] because the
+/// executor's `RefCell` was borrowed at the time [`TaskWaker::wake`]
+/// fired.  Called at the end of every [`Executor::flush_instance`].
 fn drain_pending_wakes() {
     PENDING_WAKES.with(|pw| {
         let wakes = std::mem::take(&mut *pw.borrow_mut());
@@ -1157,21 +1160,24 @@ impl Future for YieldNow {
 ///
 /// Used internally by `auralis_signal` to defer subscriber callback
 /// execution.  The closure is drained before the main poll loop.
+///
+/// Routes to the current executor (via [`with_executor`]) when one is
+/// active; falls back to the global thread-local executor.
 pub fn schedule_callback(f: Box<dyn FnOnce()>) {
-    EXECUTOR.with(|exec| {
-        let maybe_sched = {
-            let mut ex = exec.borrow_mut();
-            ex.deferred_callbacks.push(f);
-            if ex.in_flush {
-                None
-            } else {
-                ex.try_schedule_flush()
-            }
-        };
-        if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
+    let exec = current_executor_instance();
+    let maybe_sched = {
+        let mut ex = exec.borrow_mut();
+        ex.deferred_callbacks.push(f);
+        if ex.in_flush {
+            None
+        } else {
+            ex.try_schedule_flush()
         }
-    });
+    };
+    if let Some(sched) = maybe_sched {
+        let ex2 = Rc::clone(&exec);
+        sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,20 +1188,23 @@ pub fn schedule_callback(f: Box<dyn FnOnce()>) {
 ///
 /// Safe to call from inside [`Drop`] — the actual `signal.set(value)` is
 /// deferred to a subsequent flush, avoiding re-entrant borrow panics.
+///
+/// Routes to the current executor (via [`with_executor`]) when one is
+/// active; falls back to the global thread-local executor.
 pub fn set_deferred<T: 'static>(signal: &Signal<T>, value: T) {
     let signal = signal.clone();
-    EXECUTOR.with(|exec| {
-        let maybe_sched = {
-            let mut ex = exec.borrow_mut();
-            ex.deferred_ops.push(DeferredOp {
-                f: Box::new(move || signal.set(value)),
-            });
-            ex.try_schedule_flush()
-        };
-        if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
-        }
-    });
+    let exec = current_executor_instance();
+    let maybe_sched = {
+        let mut ex = exec.borrow_mut();
+        ex.deferred_ops.push(DeferredOp {
+            f: Box::new(move || signal.set(value)),
+        });
+        ex.try_schedule_flush()
+    };
+    if let Some(sched) = maybe_sched {
+        let ex2 = Rc::clone(&exec);
+        sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
+    }
 }
 
 // ---------------------------------------------------------------------------
