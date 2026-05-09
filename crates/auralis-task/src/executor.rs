@@ -378,6 +378,15 @@ impl Executor {
         {
             let mut e = ex.borrow_mut();
             if e.in_flush {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[auralis-task] WARNING: Executor::flush_instance called \
+                         re-entrantly (already inside a flush). This is a no-op. \
+                         Check for nested flush() calls in signal callbacks or \
+                         ScheduleFlush implementations."
+                    );
+                }
                 return;
             }
             e.in_flush = true;

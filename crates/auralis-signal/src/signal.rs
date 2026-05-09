@@ -452,6 +452,16 @@ impl<T> Signal<T> {
         self.state.borrow().subscribers.len()
     }
 
+    /// Return the current version number.
+    ///
+    /// The version is incremented (wrapping) on every [`set`](Signal::set)
+    /// call.  It can be used to detect mutations without cloning the
+    /// stored value.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.state.borrow().version
+    }
+
     /// Return the number of currently registered subscribers.
     ///
     /// This is intended for testing and debugging.
@@ -692,4 +702,30 @@ fn track_observer<T: 'static>(sig: &Signal<T>) {
             (observer.on_subscribe)(cleanup);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_version_increments_on_set() {
+        let sig = Signal::new(0i32);
+        assert_eq!(sig.version(), 0);
+
+        sig.set(1);
+        assert_eq!(sig.version(), 1);
+
+        sig.set(2);
+        assert_eq!(sig.version(), 2);
+    }
+
+    #[test]
+    fn signal_version_unchanged_without_set() {
+        let sig = Signal::new(42);
+        let v1 = sig.version();
+        // read() does not change version.
+        let _ = sig.read();
+        assert_eq!(sig.version(), v1);
+    }
 }

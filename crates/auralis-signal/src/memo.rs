@@ -88,6 +88,9 @@ pub struct Memo<T> {
     /// suppresses `bump_version` when this is set, preventing
     /// re-entrant reader wake-ups during compute.
     computing: Rc<Cell<bool>>,
+    /// Number of successful recomputations (including the initial
+    /// compute in [`new`](Memo::new)).
+    compute_count: Rc<Cell<u64>>,
 }
 
 impl<T: Clone + 'static> Memo<T> {
@@ -106,6 +109,7 @@ impl<T: Clone + 'static> Memo<T> {
         let dirty = Rc::new(Cell::new(true));
         let subscriptions: SubscriptionList = Rc::new(RefCell::new(Vec::new()));
         let computing = Rc::new(Cell::new(false));
+        let compute_count = Rc::new(Cell::new(0));
 
         let holder: Rc<RefCell<Option<Signal<T>>>> = Rc::new(RefCell::new(None));
 
@@ -120,9 +124,11 @@ impl<T: Clone + 'static> Memo<T> {
             compute,
             subscriptions,
             computing,
+            compute_count,
         };
 
         memo.dirty.set(false);
+        memo.compute_count.set(1);
         memo
     }
 
@@ -158,6 +164,26 @@ impl<T: Clone + 'static> Memo<T> {
     pub async fn changed(&self) -> T {
         self.signal.changed().await;
         self.read()
+    }
+
+    /// Return `true` if any source signal has changed since the last
+    /// recomputation.
+    ///
+    /// A dirty memo will recompute on the next [`read`](Memo::read) or
+    /// [`with`](Memo::with) call.  This is a cheap flag check — it does
+    /// not trigger computation.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
+    /// Return the number of successful recomputations so far.
+    ///
+    /// Includes the initial compute performed during [`new`](Memo::new).
+    /// Panicked recomputations are **not** counted.
+    #[must_use]
+    pub fn compute_count(&self) -> u64 {
+        self.compute_count.get()
     }
 
     // ------------------------------------------------------------------
@@ -210,6 +236,8 @@ impl<T: Clone + 'static> Memo<T> {
 
                 self.signal.set(new_value);
                 self.dirty.set(false);
+                self.compute_count
+                    .set(self.compute_count.get().wrapping_add(1));
             }
             Err(payload) => {
                 // Compute panicked — clean up partial new subscriptions.
@@ -329,6 +357,7 @@ impl<T> Clone for Memo<T> {
             compute: Rc::clone(&self.compute),
             subscriptions: Rc::clone(&self.subscriptions),
             computing: Rc::clone(&self.computing),
+            compute_count: Rc::clone(&self.compute_count),
         }
     }
 }
@@ -532,5 +561,49 @@ mod tests {
         // Both clones see the same dirty state.
         assert_eq!(m1.read(), 30);
         assert_eq!(m2.read(), 30);
+    }
+
+    #[test]
+    fn memo_is_dirty_flag() {
+        let a = Signal::new(1);
+        let a2 = a.clone();
+        let memo = Memo::new(move || a2.read() * 2);
+
+        // After construction, memo is clean.
+        assert!(!memo.is_dirty());
+
+        // Source change marks memo dirty.
+        a.set(5);
+        assert!(memo.is_dirty());
+
+        // read() clears the dirty flag.
+        assert_eq!(memo.read(), 10);
+        assert!(!memo.is_dirty());
+    }
+
+    #[test]
+    fn memo_compute_count_increments() {
+        let a = Signal::new(1);
+        let a2 = a.clone();
+        let memo = Memo::new(move || a2.read() * 2);
+
+        // Initial compute counts as 1.
+        assert_eq!(memo.compute_count(), 1);
+
+        // read() without source change does NOT recompute.
+        let _ = memo.read();
+        assert_eq!(memo.compute_count(), 1);
+
+        // Source change + read triggers recompute.
+        a.set(10);
+        let _ = memo.read();
+        assert_eq!(memo.compute_count(), 2);
+
+        // Clones share the same counter.
+        let clone = memo.clone();
+        assert_eq!(clone.compute_count(), 2);
+        a.set(20);
+        let _ = clone.read();
+        assert_eq!(memo.compute_count(), 3);
     }
 }
