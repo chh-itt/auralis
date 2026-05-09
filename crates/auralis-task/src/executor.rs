@@ -202,7 +202,7 @@ impl Wake for TaskWaker {
         } else {
             PENDING_WAKES.with(|pw| {
                 pw.borrow_mut()
-                    .push((self.task_id, self.priority, self.slot_id, self.generation));
+                    .push((self.task_id, self.slot_id, self.generation));
             });
             None
         };
@@ -334,6 +334,19 @@ impl Executor {
     }
 
     fn free_slot(&mut self, task_id: TaskId) {
+        // Clean up any pending timer for this task so a recycled
+        // task ID is not spuriously woken by an old deadline.
+        if let Some(Some(ref t)) = self.tasks.get(task_id as usize) {
+            if t.timer_deadline != 0 {
+                let dl = t.timer_deadline;
+                if let Some(tids) = self.timers.get_mut(&dl) {
+                    tids.retain(|id| *id != task_id);
+                    if tids.is_empty() {
+                        self.timers.remove(&dl);
+                    }
+                }
+            }
+        }
         self.tasks[task_id as usize] = None;
         self.free_slots.push(task_id);
     }
@@ -389,7 +402,7 @@ impl Executor {
 
 thread_local! {
     static EXECUTOR: Rc<RefCell<Executor>> = Rc::new(RefCell::new(Executor::new()));
-    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority, u64, u64)>> =
+    static PENDING_WAKES: RefCell<Vec<(TaskId, u64, u64)>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -860,7 +873,7 @@ pub(crate) fn current_time_ms() -> u64 {
 fn drain_pending_wakes() {
     PENDING_WAKES.with(|pw| {
         let wakes = std::mem::take(&mut *pw.borrow_mut());
-        for (tid, _priority, slot_id, gen) in wakes {
+        for (tid, slot_id, gen) in wakes {
             let Some(exec) = lookup_executor(slot_id, gen) else {
                 continue;
             };

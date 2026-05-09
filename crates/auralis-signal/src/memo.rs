@@ -271,8 +271,6 @@ impl<T: Clone + 'static> Memo<T> {
                 let mut old = self.subscriptions.borrow_mut();
                 let old_subs: Vec<(SignalKey, CleanupFn)> = std::mem::take(&mut *old);
 
-                let old_keys: HashSet<SignalKey> = old_subs.iter().map(|(k, _)| *k).collect();
-
                 let mut keep = Vec::with_capacity(old_subs.len().max(effective_read.len()));
                 for (key, cleanup) in old_subs {
                     if effective_read.contains(&key) {

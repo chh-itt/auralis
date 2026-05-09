@@ -549,21 +549,15 @@ impl<T: Clone + 'static, U, F: Fn(&T) -> U> SignalMap<T, U, F> {
     /// result through `g`.  This avoids an intermediate clone of `U`.
     #[must_use]
     pub fn with<R>(&self, g: impl FnOnce(&U) -> R) -> R {
-        let mapped = (self.f)(&self.source.state.borrow().value);
-        // Track the source signal for observer-based dependency
-        // tracking (Memo).  read() already does this via
-        // self.source.with(); with() must match.
-        track_observer(&self.source);
-        g(&mapped)
+        // Delegate to source.with() so that observer tracking is
+        // handled uniformly with read().
+        self.source.with(|v| g(&(self.f)(v)))
     }
 
     /// Return a future that resolves with the mapped value on the next
     /// source signal mutation.  Delegates to the underlying signal's
     /// [`changed`](Signal::changed).
-    pub async fn changed(&self) -> U
-    where
-        T: Clone,
-    {
+    pub async fn changed(&self) -> U {
         self.source.changed().await;
         self.read()
     }
@@ -592,6 +586,16 @@ pub(crate) fn borrow_state<T>(sig: &Signal<T>) -> std::cell::Ref<'_, SignalState
 /// The callback is invoked (with no arguments) via the executor's deferred
 /// queue on every subsequent [`Signal::set`] call.  It should capture the
 /// signal and call `.read()` if it needs the current value.
+///
+/// # Safety / guarantees
+///
+/// - If `unsubscribe` is called before a deferred notification fires,
+///   the `alive` flag is set to false and the in-flight closure skips
+///   the callback.  No double-fire is possible.
+/// - Calling `unsubscribe` with a stale or already-unsubscribed id is
+///   a no-op.
+/// - The returned id is valid until `unsubscribe` is called; it is
+///   not recycled.
 #[doc(hidden)]
 pub fn subscribe<T>(sig: &Signal<T>, callback: Rc<dyn Fn()>) -> SubscriberId {
     let mut state = sig.state.borrow_mut();
