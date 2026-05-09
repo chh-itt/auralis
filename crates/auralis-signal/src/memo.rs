@@ -117,7 +117,14 @@ impl<T: Clone + 'static> Memo<T> {
 
         let holder: Rc<RefCell<Option<Signal<T>>>> = Rc::new(RefCell::new(None));
 
-        let value = run_compute(&compute, &dirty, &subscriptions, &holder, &computing);
+        let (value, _read_keys) = run_compute(
+            &compute,
+            &dirty,
+            &subscriptions,
+            &holder,
+            &computing,
+            &HashSet::new(),
+        );
 
         let signal = Signal::new(value);
         *holder.borrow_mut() = Some(signal.clone());
@@ -217,6 +224,16 @@ impl<T: Clone + 'static> Memo<T> {
         }
         self.computing.set(true);
 
+        // Collect old keys so the observer can skip already-subscribed
+        // signals, avoiding duplicate subscribe/unsubscribe churn on
+        // shared dependencies.
+        let old_keys: HashSet<SignalKey> = self
+            .subscriptions
+            .borrow()
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+
         // Collect new subscriptions here; old ones stay live.
         let new_subs: SubscriptionList = Rc::new(RefCell::new(Vec::new()));
         let holder = Rc::new(RefCell::new(Some(self.signal.clone())));
@@ -228,41 +245,43 @@ impl<T: Clone + 'static> Memo<T> {
                 &new_subs,
                 &holder,
                 &self.computing,
+                &old_keys,
             )
         }));
 
         match result {
-            Ok(new_value) => {
+            Ok((new_value, read_keys)) => {
                 // --- Incremental subscription diff ---
                 //
-                // Build a set of new SignalKeys for O(1) lookup.
-                // Iterate old subscriptions in one pass, partitioning
-                // into "keep" (shared) and "remove" (no longer a dep).
-                // Then add truly new subscriptions (in new_subs but
-                // not in old_keys).
-                let new_keys: HashSet<SignalKey> =
-                    new_subs.borrow().iter().map(|(k, _)| *k).collect();
+                // `read_keys` contains every signal that was actually
+                // read during compute (including pre-seen ones that the
+                // observer skipped subscribing to).
+                //
+                // Old subscriptions whose key is in `read_keys` are
+                // kept (they were re-read and are still dependencies).
+                // Old subscriptions whose key is NOT in `read_keys`
+                // are removed (no longer read by the compute function).
+                //
+                // `new_subs` contains only subscriptions for signals
+                // that were NOT in pre-seen (genuinely new deps).
 
                 let mut old = self.subscriptions.borrow_mut();
                 let old_subs: Vec<(SignalKey, CleanupFn)> = std::mem::take(&mut *old);
 
                 let old_keys: HashSet<SignalKey> = old_subs.iter().map(|(k, _)| *k).collect();
 
-                let mut keep = Vec::with_capacity(old_subs.len().max(new_keys.len()));
+                let mut keep = Vec::with_capacity(old_subs.len().max(read_keys.len()));
                 for (key, cleanup) in old_subs {
-                    if new_keys.contains(&key) {
-                        keep.push((key, cleanup)); // shared — reuse
+                    if read_keys.contains(&key) {
+                        keep.push((key, cleanup)); // still a dependency
                     } else {
-                        cleanup(); // removed dependency — unsubscribe
+                        cleanup(); // no longer read — unsubscribe
                     }
                 }
 
                 // Add genuinely new subscriptions; unsubscribe duplicates.
                 for (key, cleanup) in new_subs.borrow_mut().drain(..) {
                     if old_keys.contains(&key) {
-                        // Same SignalKey → old subscription is already
-                        // in `keep`.  Drop this duplicate to avoid
-                        // accumulating subscribers on the source signal.
                         cleanup();
                     } else {
                         keep.push((key, cleanup));
@@ -338,14 +357,17 @@ fn run_compute<T: Clone + 'static>(
     subscriptions: &SubscriptionList,
     signal_holder: &Rc<RefCell<Option<Signal<T>>>>,
     computing: &Rc<Cell<bool>>,
-) -> T {
+    pre_seen: &HashSet<SignalKey>,
+) -> (T, HashSet<SignalKey>) {
     let dirty2 = Rc::clone(dirty);
     let subs = Rc::clone(subscriptions);
     let holder = Rc::clone(signal_holder);
     let computing2 = Rc::clone(computing);
     // Track which signals we've already subscribed to, so that
     // reading the same signal twice doesn't create duplicate subs.
-    let seen: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(HashSet::new()));
+    // Pre-populate with old dependencies so that shared signals are
+    // not unsubscribed/resubscribed on every recomputation.
+    let seen: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(pre_seen.clone()));
     let seen2 = Rc::clone(&seen);
 
     let observer = ObserverState {
@@ -376,7 +398,9 @@ fn run_compute<T: Clone + 'static>(
     });
 
     // _guard drops here, restoring the previous observer.
-    compute()
+    let value = compute();
+    let read_keys = seen.borrow().clone();
+    (value, read_keys)
 }
 
 impl<T> Drop for Memo<T> {

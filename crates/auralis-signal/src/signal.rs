@@ -255,9 +255,10 @@ impl<T> Signal<T> {
         let mut state = state_ref.borrow_mut();
         state.notifying = false;
         state.subscribers.retain(|s| s.alive.get());
-        let was_dirty = state.dirty;
-        state.dirty = false;
-        was_dirty
+        // Don't clear dirty here — if a re-entrant set happened during
+        // callbacks, the follow-up notification scheduled by the caller
+        // must see dirty = true so it can process the pending change.
+        state.dirty
     }
 
     /// Common pre-flight for `set` and `bump_version`: check the

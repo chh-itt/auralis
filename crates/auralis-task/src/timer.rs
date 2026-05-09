@@ -43,9 +43,13 @@ impl Future for SleepFuture {
             id.expect("timer::sleep must be called from within an auralis task")
         });
 
-        // Compute deadline and register with the executor.
+        // If the deadline has already passed (e.g. Duration::ZERO),
+        // return immediately without scheduling a timer.
         let now = executor::current_time_ms();
         let deadline = now.saturating_add(self.duration_ms);
+        if self.duration_ms == 0 || (now > 0 && deadline <= now) {
+            return Poll::Ready(());
+        }
 
         executor::Executor::schedule_timer(
             &executor::current_executor_instance(),

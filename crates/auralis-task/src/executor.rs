@@ -15,10 +15,11 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -120,32 +121,40 @@ impl TimeSource for TestTimeSource {
 struct TaskWaker {
     task_id: TaskId,
     priority: Priority,
+    /// Opaque id of the executor that owns this task.
+    /// Looked up via [`EXECUTOR_REGISTRY`] on wake.
+    executor_id: u64,
 }
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        let maybe_sched = EXECUTOR.with(|exec| {
-            if let Ok(mut ex) = exec.try_borrow_mut() {
-                match self.priority {
-                    Priority::High => ex.high_queue.push_back(self.task_id),
-                    Priority::Low => ex.low_queue.push_back(self.task_id),
-                }
-                // Only schedule a fresh flush if we're NOT already inside
-                // one (the running flush loop will pick up the task).
-                if ex.in_flush {
-                    None
-                } else {
-                    ex.try_schedule_flush()
-                }
-            } else {
-                PENDING_WAKES.with(|pw| {
-                    pw.borrow_mut().push((self.task_id, self.priority));
-                });
-                None
+        let Some(exec) = lookup_executor(self.executor_id) else {
+            return;
+        };
+        let maybe_sched = if let Ok(mut ex) = exec.try_borrow_mut() {
+            match self.priority {
+                Priority::High => ex.high_queue.push_back(self.task_id),
+                Priority::Low => ex.low_queue.push_back(self.task_id),
             }
-        });
+            if ex.in_flush {
+                None
+            } else {
+                ex.try_schedule_flush()
+            }
+        } else {
+            PENDING_WAKES.with(|pw| {
+                pw.borrow_mut()
+                    .push((self.task_id, self.priority, self.executor_id));
+            });
+            None
+        };
         if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
+            let eid = self.executor_id;
+            sched.schedule(Box::new(move || {
+                if let Some(ex) = lookup_executor(eid) {
+                    Executor::flush_instance(&ex);
+                }
+            }));
         }
     }
 }
@@ -205,6 +214,9 @@ pub struct Executor {
     /// woken when that deadline expires.  Processed at the start of
     /// every flush.
     timers: BTreeMap<u64, Vec<TaskId>>,
+    /// Unique id for this executor, used by [`TaskWaker`] to route
+    /// wakes to the correct executor via [`EXECUTOR_REGISTRY`].
+    id: u64,
 }
 
 // Set by the executor before polling a task, cleared afterward.
@@ -212,6 +224,47 @@ pub struct Executor {
 // layers of combinators.
 thread_local! {
     static CURRENT_POLLING_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
+}
+
+// Maps executor ids to their instances so that TaskWaker (which is
+// Send + Sync and cannot hold an Rc) can route wakes to the correct
+// executor without unsafe code.
+static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static EXECUTOR_REGISTRY: RefCell<HashMap<u64, ExecutorRef>> =
+        RefCell::new(HashMap::new());
+}
+
+fn register_executor(id: u64, ex: &ExecutorRef) {
+    EXECUTOR_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, Rc::clone(ex));
+    });
+}
+
+#[allow(dead_code)]
+fn unregister_executor(id: u64) {
+    EXECUTOR_REGISTRY.with(|reg| {
+        reg.borrow_mut().remove(&id);
+    });
+}
+
+/// Return the executor for `executor_id`, registering the global
+/// executor (id 0 or 1) on first access.
+fn lookup_executor(executor_id: u64) -> Option<ExecutorRef> {
+    EXECUTOR_REGISTRY.with(|reg| {
+        if let Some(ex) = reg.borrow().get(&executor_id) {
+            return Some(Rc::clone(ex));
+        }
+        // Lazy-register the global executor under id 1.
+        if executor_id <= 1 {
+            let global = EXECUTOR.with(Rc::clone);
+            global.borrow_mut().id = 1;
+            reg.borrow_mut().insert(1, Rc::clone(&global));
+            return Some(global);
+        }
+        None
+    })
 }
 
 pub(crate) fn with_current_polling_task<R>(f: impl FnOnce(Option<TaskId>) -> R) -> R {
@@ -239,6 +292,7 @@ impl Executor {
             time_budget_ms: 8,
             panic_hook: None,
             timers: BTreeMap::new(),
+            id: 0,
         }
     }
 
@@ -308,7 +362,8 @@ impl Executor {
 
 thread_local! {
     static EXECUTOR: Rc<RefCell<Executor>> = Rc::new(RefCell::new(Executor::new()));
-    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority)>> = const { RefCell::new(Vec::new()) };
+    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority, u64)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +379,11 @@ impl Executor {
     /// callbacks are routed to it.
     #[must_use]
     pub fn new_instance() -> Rc<RefCell<Executor>> {
-        Rc::new(RefCell::new(Executor::new()))
+        let ex = Rc::new(RefCell::new(Executor::new()));
+        let id = NEXT_EXECUTOR_ID.fetch_add(1, Ordering::Relaxed);
+        ex.borrow_mut().id = id;
+        register_executor(id, &ex);
+        ex
     }
 
     /// Install a flush scheduler on this executor instance.
@@ -427,7 +486,16 @@ impl Executor {
         {
             let mut e = ex.borrow_mut();
             let now = e.now_ms();
-            if now > 0 {
+            // When no TimeSource is registered (now == 0), expire all
+            // timers — they've already been woken via wake_by_ref and
+            // just need to be re-polled.
+            if now == 0 {
+                for (_, tasks) in std::mem::take(&mut e.timers) {
+                    for tid in tasks {
+                        e.enqueue(tid);
+                    }
+                }
+            } else {
                 let expired: Vec<u64> =
                     e.timers.keys().copied().take_while(|&d| d <= now).collect();
                 for deadline in expired {
@@ -507,6 +575,7 @@ impl Executor {
                 let waker = Waker::from(Arc::new(TaskWaker {
                     task_id: tid,
                     priority,
+                    executor_id: ex.borrow().id,
                 }));
                 let mut cx = Context::from_waker(&waker);
 
@@ -687,24 +756,23 @@ pub(crate) fn current_time_ms() -> u64 {
 fn drain_pending_wakes() {
     PENDING_WAKES.with(|pw| {
         let wakes = std::mem::take(&mut *pw.borrow_mut());
-        if wakes.is_empty() {
-            return;
-        }
-        EXECUTOR.with(|exec| {
+        for (tid, priority, executor_id) in wakes {
+            let Some(exec) = lookup_executor(executor_id) else {
+                continue;
+            };
             let maybe_sched = {
                 let mut ex = exec.borrow_mut();
-                for (id, priority) in wakes {
-                    match priority {
-                        Priority::High => ex.high_queue.push_back(id),
-                        Priority::Low => ex.low_queue.push_back(id),
-                    }
+                match priority {
+                    Priority::High => ex.high_queue.push_back(tid),
+                    Priority::Low => ex.low_queue.push_back(tid),
                 }
                 ex.try_schedule_flush()
             };
             if let Some(sched) = maybe_sched {
-                sched.schedule(Box::new(flush));
+                let ex2 = Rc::clone(&exec);
+                sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
             }
-        });
+        }
     });
 }
 
@@ -926,6 +994,13 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
             .collect();
         all_free.sort_unstable();
         all_free.dedup();
+        // Cap growth: free_slots should never significantly exceed the
+        // number of active slots.  More entries than tasks + a generous
+        // buffer are pure waste from repeated create/cancel cycles.
+        let cap = ex.tasks.len().saturating_add(256);
+        if all_free.len() > cap {
+            all_free.truncate(cap);
+        }
         ex.free_slots = all_free;
 
         dropped
