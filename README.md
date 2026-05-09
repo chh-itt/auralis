@@ -17,8 +17,8 @@ async tasks; lifecycle = ownership + structured concurrency.**
 
 | Crate | Role | Dependencies |
 |---|---|---|
-| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, batch updates, change-detection futures | **zero** |
-| `auralis-task` | `TaskScope`, priority executor, cancellation, context DI, panic hook | `auralis-signal` only |
+| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, `memo!` macro, batch updates, change-detection futures | **zero** |
+| `auralis-task` | `TaskScope`, priority executor, `timer::sleep`, cancellation, context DI, panic hook | `auralis-signal` only |
 
 ## Quick Start
 
@@ -100,15 +100,20 @@ crates/
       batch.rs          # BatchGuard, batch(), in_batch()
       observer.rs       # ObserverState, OBSERVER thread-local
       future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
-  auralis-task/         # TaskScope tree, executor, context DI
+  auralis-task/         # TaskScope tree, executor, timer, context DI
     src/
       executor.rs       # Priority executor, time budget, deferred callbacks
       scope.rs          # TaskScope, CallbackHandle, context system
-      debug.rs          # dump_task_tree() (feature-gated)
+      timer.rs          # timer::sleep() cooperative delay
+        debug.rs          # dump_task_tree() (feature-gated)
     examples/
       counter.rs        # Runnable CLI demo
     tests/
       signal_task_integration.rs  # Cross-crate integration tests
+demos/
+  egui-demo/            # Auralis vs plain egui comparison
+    examples/
+      perf_report.rs    # Headless performance benchmark
 docs/
   vision-and-design.md  # Design philosophy (EN)
   architecture.md       # Architecture & modules (EN)

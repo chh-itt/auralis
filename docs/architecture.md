@@ -96,8 +96,9 @@ to its sources and recovers on the next successful `read()`.
 
 | File | Responsibility |
 |------|---------------|
-| `executor.rs` | Single-threaded executor: dual priority queues, time budget, deferred ops/callbacks, instance isolation, configurable panic hook |
+| `executor.rs` | Single-threaded executor: dual priority queues, timer queue, time budget, deferred ops/callbacks, slot-based waker routing, instance isolation, configurable panic hook |
 | `scope.rs` | `TaskScope` tree: parent/child relations, iterative cancellation, suspend/resume, context DI, `CallbackHandle` |
+| `timer.rs` | `timer::sleep()` cooperative delay, `SleepFuture` with deadline re-check |
 | `debug.rs` | `dump_task_tree()` diagnostic (behind `debug` feature) |
 | `lib.rs` | Crate root, public API + `Priority` enum |
 
@@ -105,13 +106,15 @@ to its sources and recovers on the next successful `read()`.
 
 ```
 flush() → Executor::flush_instance(&global_executor)
+            ├─ Step 0: drain expired timers (all if no TimeSource)
             ├─ Step 1: execute deferred ops (set_deferred, etc.)
-            ├─ Step 2: drain deferred signal callbacks (time-budgeted)
+            ├─ Step 2: drain deferred signal callbacks (time-budgeted, catch_unwind isolated)
             └─ Step 3: main poll loop
                 ├─ High-priority queue first
                 ├─ Temporarily remove future (avoids borrow conflicts)
-                ├─ Inject scope, catch_unwind, poll
+                ├─ Inject scope, inject task id (for timer::sleep), catch_unwind, poll
                 └─ Time budget exceeded → schedule continuation
+            └─ drain PENDING_WAKES (buffered wake-ups during RefCell borrow)
 ```
 
 **Key design points:**
@@ -119,8 +122,13 @@ flush() → Executor::flush_instance(&global_executor)
 - **"Take out before poll" pattern:** the future is temporarily removed from
   the task table before polling, so nested spawns/wakes never hit a borrowed
   `RefCell`.
-- **TaskWaker:** carries only `task_id: u64` and priority — trivially
-  `Send + Sync` for `Waker::from`.
+- **TaskWaker:** stores `(task_id, priority, slot_id, generation)`.  The
+  slot_id indexes into a thread-local `Vec<Slot>` table; the generation
+  counter invalidates stale wakers after executor destruction.  This keeps
+  the waker `Send + Sync` without holding an `Rc`.
+- **Timer queue:** `BTreeMap<deadline_ms, Vec<TaskId>>`, checked at Step 0.
+  Each `TaskState` has a `timer_deadline` reverse index for O(1) cleanup on
+  task cancellation.  Without a `TimeSource`, all timers expire on every flush.
 - **Time budget:** configurable (default 8 ms) via `set_global_time_budget`
   or `Executor::set_time_budget`. Set to `u64::MAX` to disable.
 - **Instance executor:** `Executor::new_instance()` creates a fully
@@ -128,17 +136,16 @@ flush() → Executor::flush_instance(&global_executor)
 
 **Signal routing constraint:**
 
-Signal notifications use a single global schedule hook (installed by the
-first `init_flush_scheduler` call).  The hook routes callbacks to **the
-executor that is current when the notification fires** — not the executor
-that was current when `Signal::set` was called.  For multi-instance users
-this means:
+The global signal schedule hook (installed by `init_flush_scheduler`) and
+functions like `schedule_callback` / `set_deferred` now use
+`current_executor_instance()`, which checks for an active `with_executor`
+context first and falls back to the global executor.  For multi-instance
+users this means:
 
 1. `init_flush_scheduler` must be called at least once (otherwise `set`
    falls back to synchronous execution).
-2. `with_executor` must wrap the entire request lifecycle — from signal
-   creation through the final flush — so that deferred callbacks land in
-   the correct instance.
+2. `with_executor` sets the current executor for signal callbacks and
+   `set_deferred` calls within its scope.
 
 For single-threaded use (Wasm, game loop, CLI), no special care is needed:
 call `init_flush_scheduler` once at startup and never use `with_executor`.

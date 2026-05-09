@@ -19,6 +19,7 @@ Built on `auralis-signal`. `#![forbid(unsafe_code)]`. Single-threaded by design.
 | `set_deferred(sig, val)` | Safe `Signal::set` from `Drop` contexts |
 | `yield_now()` | Yield control back to the executor once |
 | `schedule_callback(f)` | Run `f` at the start of the next flush |
+| `timer::sleep(dur)` | Cooperative async delay (requires TimeSource for real-time; degrades to yield_now otherwise) |
 
 ## Quick Start
 
@@ -54,7 +55,9 @@ drop(scope); // cancels all spawned tasks
 - **Iterative scope cancellation** — BFS collect + leaf-to-root cancel, 200+ nesting levels without stack overflow
 - **Configurable time budget** — `set_global_time_budget(ms)`, default 8 ms; set to `u64::MAX` to disable
 - **Panic hook** — `set_panic_hook(hook)` to observe task failures with task_id and scope_id
-- **Instance isolation** — `Executor::new_instance()` + `with_executor()` for multi-threaded SSR
+- **Instance isolation** — `Executor::new_instance()` + `with_executor()` for multi-threaded SSR; slot-based waker routing with generation counters
+- **Cooperative timer** — `timer::sleep(dur)` works with any `TimeSource` implementation
+- **Panic-safe callbacks** — each deferred signal callback is `catch_unwind`-isolated in the executor flush
 
 ## License
 

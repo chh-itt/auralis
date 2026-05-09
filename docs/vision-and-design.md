@@ -22,7 +22,7 @@ concepts Rust developers already know:
 - **Events / timers / fetch are futures** — compose with `select!`, `join!`
 
 No `on_cleanup` hooks, no manual cancel tokens, no "effect system." Just async
-Rust.
+Rust — with cooperative `timer::sleep` for delays.
 
 ## Use Cases
 

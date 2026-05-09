@@ -20,6 +20,10 @@ Zero dependencies. `#![forbid(unsafe_code)]`. Single-threaded by design (`!Send`
 | `FilterChangedFuture<T, F>` | Yields only when a predicate matches |
 | `batch(f)` | Run `f` with deferred notifications — multiple sets, one notification |
 | `in_batch()` | Check if currently inside a batch |
+| `memo!(a, b => expr)` | Convenience macro: auto-clones captured signals before the `move` closure |
+| `Signal::version()` | Return the current monotonic version number |
+| `Memo::is_dirty()` | Check whether a source has changed without triggering computation |
+| `Memo::compute_count()` | Number of successful recomputations (including initial) |
 
 ## Quick Start
 
@@ -52,6 +56,8 @@ assert_eq!(x.read(), 3);
 - **Deferred callback model** — `set()` never invokes subscribers synchronously; callbacks are queued for the next executor flush
 - **Proactive waker deregistration** — dropping a `SignalChangedFuture` immediately removes its subscriber from the signal's list, preventing stale-waker accumulation
 - **Panic-safe Memo** — if the compute function panics, old source subscriptions stay intact; the memo recovers on the next successful `read()`
+- **Incremental subscription updates** — during recompute, shared dependencies are kept; only removed/new signals trigger subscribe/unsubscribe
+- **Panic-safe batch** — `catch_unwind` around each individual notification in the batch drain
 
 ## License
 

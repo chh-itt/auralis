@@ -16,8 +16,8 @@
 
 | Crate | 职责 | 依赖 |
 |---|---|---|
-| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, batch 更新, 变更检测 future | **零** |
-| `auralis-task` | `TaskScope`, 优先级执行器, 取消, 上下文 DI, panic hook | 仅 `auralis-signal` |
+| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, `memo!` 宏, batch 更新, 变更检测 future | **零** |
+| `auralis-task` | `TaskScope`, 优先级执行器, `timer::sleep`, 取消, 上下文 DI, panic hook | 仅 `auralis-signal` |
 
 ## 快速开始
 
@@ -98,15 +98,20 @@ crates/
       batch.rs          # BatchGuard、batch()、in_batch()
       observer.rs       # ObserverState、OBSERVER thread-local
       future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
-  auralis-task/         # TaskScope 树、执行器、上下文 DI
+  auralis-task/         # TaskScope 树、执行器、timer、上下文 DI
     src/
       executor.rs       # 优先级执行器、时间预算、延迟回调
       scope.rs          # TaskScope、CallbackHandle、上下文系统
-      debug.rs          # dump_task_tree()（feature-gated）
+      timer.rs          # timer::sleep() 协作延迟
+        debug.rs          # dump_task_tree()（feature-gated）
     examples/
       counter.rs        # 可运行的 CLI 示例
     tests/
       signal_task_integration.rs  # 跨 crate 集成测试
+demos/
+  egui-demo/            # Auralis vs 纯 egui 对比演示
+    examples/
+      perf_report.rs    # 无头性能基准
 docs/
   vision-and-design.md  # 设计理念（英文）
   architecture.md       # 架构与模块（英文）
