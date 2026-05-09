@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -114,22 +114,81 @@ impl TimeSource for TestTimeSource {
 }
 
 // ---------------------------------------------------------------------------
-// TaskWaker
+// TaskWaker — routes wakes to the correct executor via a slot table.
+//
+// Waker::from requires Send + Sync + 'static, so the waker cannot hold
+// an Rc<RefCell<Executor>>.  Instead it stores a slot index + generation
+// number.  The SLOTS thread_local maps (index, generation) → Weak<Executor>.
+// On wake, the generation is validated before the weak pointer is upgraded.
+// Dead slots are reclaimed when new executors are registered.
 // ---------------------------------------------------------------------------
+
+/// A registered executor slot.  The `generation` counter distinguishes
+/// between successive executors that occupy the same slot index (e.g.
+/// after the previous one was dropped and a new one recycles the slot).
+struct Slot {
+    weak: Weak<RefCell<Executor>>,
+    /// Incremented (wrapping) every time this slot is reused.
+    /// A [`TaskWaker`] must present the generation it was created with;
+    /// a mismatch means the waker is stale and is silently ignored.
+    generation: u64,
+}
+
+thread_local! {
+    /// Slot 0 is reserved for the global executor.  Instance executors
+    /// occupy subsequent slots.  Dead slots (Weak::upgrade returns None)
+    /// are recycled in [`register_executor`].
+    static SLOTS: RefCell<Vec<Slot>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register an executor in the slot table, returning the assigned
+/// (`slot_id`, `generation`) pair.  Dead slots are recycled in-place;
+/// if no dead slot is found a new entry is appended.
+fn register_executor(weak: Weak<RefCell<Executor>>) -> (u64, u64) {
+    SLOTS.with(|slots| {
+        let mut slots = slots.borrow_mut();
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if slot.weak.upgrade().is_none() {
+                slot.weak = weak;
+                // Wrapping is safe: 2^64 reuses of a single slot
+                // would take ~10^14 years at 1 reuse/μs.
+                slot.generation = slot.generation.wrapping_add(1);
+                return (i as u64, slot.generation);
+            }
+        }
+        let gen = 0;
+        slots.push(Slot {
+            weak,
+            generation: gen,
+        });
+        ((slots.len() - 1) as u64, gen)
+    })
+}
+
+/// Look up an executor by slot id, validating the generation.
+fn lookup_executor(slot_id: u64, generation: u64) -> Option<Rc<RefCell<Executor>>> {
+    SLOTS.with(|slots| {
+        let slots = slots.borrow();
+        let slot = slots.get(slot_id as usize)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.weak.upgrade()
+    })
+}
 
 struct TaskWaker {
     task_id: TaskId,
     priority: Priority,
+    slot_id: u64,
+    generation: u64,
 }
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        // CURRENT_EXECUTOR is set during flush_instance for both global
-        // and instance executors.  If it's not set (e.g. a stale wake
-        // after the executor was dropped), fall back to the global
-        // thread-local executor.
-        let exec = current_executor().unwrap_or_else(|| EXECUTOR.with(Rc::clone));
-
+        let Some(exec) = lookup_executor(self.slot_id, self.generation) else {
+            return;
+        };
         let maybe_sched = if let Ok(mut ex) = exec.try_borrow_mut() {
             match self.priority {
                 Priority::High => ex.high_queue.push_back(self.task_id),
@@ -142,12 +201,19 @@ impl Wake for TaskWaker {
             }
         } else {
             PENDING_WAKES.with(|pw| {
-                pw.borrow_mut().push((self.task_id, self.priority));
+                pw.borrow_mut()
+                    .push((self.task_id, self.priority, self.slot_id, self.generation));
             });
             None
         };
         if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
+            let sid = self.slot_id;
+            let gen = self.generation;
+            sched.schedule(Box::new(move || {
+                if let Some(ex) = lookup_executor(sid, gen) {
+                    Executor::flush_instance(&ex);
+                }
+            }));
         }
     }
 }
@@ -207,6 +273,11 @@ pub struct Executor {
     /// woken when that deadline expires.  Processed at the start of
     /// every flush.
     timers: BTreeMap<u64, Vec<TaskId>>,
+    /// Slot index and generation in [`SLOTS`] for routing wakes back
+    /// to this executor.  Set by [`new_instance`] or lazily for the
+    /// global executor; 0 means unregistered.
+    slot_id: u64,
+    generation: u64,
 }
 
 // Set by the executor before polling a task, cleared afterward.
@@ -241,6 +312,8 @@ impl Executor {
             time_budget_ms: 8,
             panic_hook: None,
             timers: BTreeMap::new(),
+            slot_id: 0,
+            generation: 0,
         }
     }
 
@@ -310,8 +383,25 @@ impl Executor {
 
 thread_local! {
     static EXECUTOR: Rc<RefCell<Executor>> = Rc::new(RefCell::new(Executor::new()));
-    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority)>> =
+    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority, u64, u64)>> =
         const { RefCell::new(Vec::new()) };
+}
+
+/// Ensure the global executor is registered in slot 0 (lazy, idempotent).
+/// Returns (`slot_id`, `generation`) for the global executor.
+fn ensure_global_registered() -> (u64, u64) {
+    SLOTS.with(|slots| {
+        let mut slots = slots.borrow_mut();
+        if slots.is_empty() {
+            let weak = EXECUTOR.with(Rc::downgrade);
+            slots.push(Slot {
+                weak,
+                generation: 0,
+            });
+        }
+        let gen = slots[0].generation;
+        (0, gen)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +417,12 @@ impl Executor {
     /// callbacks are routed to it.
     #[must_use]
     pub fn new_instance() -> Rc<RefCell<Executor>> {
-        Rc::new(RefCell::new(Executor::new()))
+        let ex = Rc::new(RefCell::new(Executor::new()));
+        // Register in the slot table so TaskWaker can find this executor.
+        let (slot_id, generation) = register_executor(Rc::downgrade(&ex));
+        ex.borrow_mut().slot_id = slot_id;
+        ex.borrow_mut().generation = generation;
+        ex
     }
 
     /// Install a flush scheduler on this executor instance.
@@ -474,7 +569,10 @@ impl Executor {
                     break;
                 }
                 for cb in callbacks {
-                    cb();
+                    // Isolate each callback so a panic in one subscriber
+                    // doesn't block the remaining notifications or wedge
+                    // the executor (in_flush stays true on unwind).
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
                 }
                 if ex.borrow().now_ms().saturating_sub(cb_start) >= ex.borrow().time_budget_ms {
                     if !ex.borrow().deferred_callbacks.is_empty() {
@@ -523,9 +621,20 @@ impl Executor {
                     }
                 }
 
+                // Ensure the executor is registered in the slot table.
+                let (slot_id, gen) = {
+                    let e = ex.borrow();
+                    if e.slot_id == 0 && e.generation == 0 {
+                        ensure_global_registered()
+                    } else {
+                        (e.slot_id, e.generation)
+                    }
+                };
                 let waker = Waker::from(Arc::new(TaskWaker {
                     task_id: tid,
                     priority,
+                    slot_id,
+                    generation: gen,
                 }));
                 let mut cx = Context::from_waker(&waker);
 
@@ -717,24 +826,22 @@ pub(crate) fn current_time_ms() -> u64 {
 fn drain_pending_wakes() {
     PENDING_WAKES.with(|pw| {
         let wakes = std::mem::take(&mut *pw.borrow_mut());
-        if wakes.is_empty() {
-            return;
-        }
-        // Route to the current executor (set during flush_instance).
-        let exec = current_executor().unwrap_or_else(|| EXECUTOR.with(Rc::clone));
-        let maybe_sched = {
-            let mut ex = exec.borrow_mut();
-            for (tid, priority) in wakes {
-                match priority {
-                    Priority::High => ex.high_queue.push_back(tid),
-                    Priority::Low => ex.low_queue.push_back(tid),
-                }
+        for (tid, _priority, slot_id, gen) in wakes {
+            let Some(exec) = lookup_executor(slot_id, gen) else {
+                continue;
+            };
+            // Use enqueue() for the stale-task-id safety check.
+            exec.borrow_mut().enqueue(tid);
+            let maybe_sched = exec.borrow_mut().try_schedule_flush();
+            if let Some(sched) = maybe_sched {
+                let sid = slot_id;
+                let g = gen;
+                sched.schedule(Box::new(move || {
+                    if let Some(ex) = lookup_executor(sid, g) {
+                        Executor::flush_instance(&ex);
+                    }
+                }));
             }
-            ex.try_schedule_flush()
-        };
-        if let Some(sched) = maybe_sched {
-            let ex2 = Rc::clone(&exec);
-            sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
         }
     });
 }
@@ -919,11 +1026,9 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
         for slot in &mut ex.tasks {
             if let Some(ref t) = slot {
                 if t.scope_id == scope_id {
-                    dropped.push(
-                        slot.take()
-                            .expect("task slot was None after is_some check")
-                            .future,
-                    );
+                    if let Some(state) = slot.take() {
+                        dropped.push(state.future);
+                    }
                 }
             }
         }
@@ -1068,6 +1173,8 @@ pub fn set_deferred<T: 'static>(signal: &Signal<T>, value: T) {
 /// application code.
 pub fn reset_executor_for_test() {
     PENDING_WAKES.with(|pw| pw.borrow_mut().clear());
+    SLOTS.with(|s| s.borrow_mut().clear());
+    CURRENT_EXECUTOR.with(|c| *c.borrow_mut() = None);
     EXECUTOR.with(|exec| {
         let mut ex = exec.borrow_mut();
         ex.high_queue.clear();
@@ -1081,6 +1188,8 @@ pub fn reset_executor_for_test() {
         ex.deferred_callbacks.clear();
         ex.flush_scheduler = None;
         ex.time_source = None;
+        ex.slot_id = 0;
+        ex.generation = 0;
     });
     crate::scope::clear_scope_registry();
 }

@@ -550,6 +550,10 @@ impl<T: Clone + 'static, U, F: Fn(&T) -> U> SignalMap<T, U, F> {
     #[must_use]
     pub fn with<R>(&self, g: impl FnOnce(&U) -> R) -> R {
         let mapped = (self.f)(&self.source.state.borrow().value);
+        // Track the source signal for observer-based dependency
+        // tracking (Memo).  read() already does this via
+        // self.source.with(); with() must match.
+        track_observer(&self.source);
         g(&mapped)
     }
 

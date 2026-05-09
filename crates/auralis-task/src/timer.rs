@@ -13,10 +13,14 @@ use crate::executor;
 /// A future that completes after a given duration.
 ///
 /// Created by [`sleep`].  On first poll it registers a timer with the
-/// executor; subsequent polls return `Ready` once the deadline has passed.
+/// executor and computes a deadline.  Subsequent polls check the
+/// deadline — this makes the future robust against premature re-polls
+/// (e.g. from `select!` or executor wake-ups unrelated to the timer).
 pub struct SleepFuture {
     registered: bool,
     duration_ms: u64,
+    /// Deadline in milliseconds, computed on first poll.
+    deadline_ms: u64,
 }
 
 impl SleepFuture {
@@ -25,6 +29,7 @@ impl SleepFuture {
         Self {
             registered: false,
             duration_ms: duration.as_millis() as u64,
+            deadline_ms: 0,
         }
     }
 }
@@ -34,7 +39,13 @@ impl Future for SleepFuture {
 
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
         if self.registered {
-            return Poll::Ready(());
+            let now = executor::current_time_ms();
+            // Without a TimeSource (now == 0), all timers fire on each
+            // flush; treat as expired.
+            if now == 0 || now >= self.deadline_ms {
+                return Poll::Ready(());
+            }
+            return Poll::Pending;
         }
         self.registered = true;
 
@@ -43,17 +54,18 @@ impl Future for SleepFuture {
             id.expect("timer::sleep must be called from within an auralis task")
         });
 
+        let now = executor::current_time_ms();
+        self.deadline_ms = now.saturating_add(self.duration_ms);
+
         // If the deadline has already passed (e.g. Duration::ZERO),
         // return immediately without scheduling a timer.
-        let now = executor::current_time_ms();
-        let deadline = now.saturating_add(self.duration_ms);
-        if self.duration_ms == 0 || (now > 0 && deadline <= now) {
+        if self.duration_ms == 0 || (now > 0 && self.deadline_ms <= now) {
             return Poll::Ready(());
         }
 
         executor::Executor::schedule_timer(
             &executor::current_executor_instance(),
-            deadline,
+            self.deadline_ms,
             task_id,
         );
 

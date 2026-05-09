@@ -582,6 +582,9 @@ mod tests {
         // `a` is no longer a dependency; changing it should not affect
         // the memo.
         a.set(999);
+        // Verify that `a` was actually unsubscribed — the memo must
+        // NOT be dirty after `a` changes.
+        assert!(!memo.is_dirty());
         assert_eq!(memo.read(), 300);
     }
 
