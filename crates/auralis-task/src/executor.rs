@@ -336,19 +336,26 @@ impl Executor {
     fn free_slot(&mut self, task_id: TaskId) {
         // Clean up any pending timer for this task so a recycled
         // task ID is not spuriously woken by an old deadline.
+        // This works when the slot is still occupied (scope cancel
+        // path).  For normal completion (Poll::Ready), the slot is
+        // already None and the caller must call cleanup_timer first.
         if let Some(Some(ref t)) = self.tasks.get(task_id as usize) {
             if t.timer_deadline != 0 {
-                let dl = t.timer_deadline;
-                if let Some(tids) = self.timers.get_mut(&dl) {
-                    tids.retain(|id| *id != task_id);
-                    if tids.is_empty() {
-                        self.timers.remove(&dl);
-                    }
-                }
+                self.cleanup_timer(task_id, t.timer_deadline);
             }
         }
         self.tasks[task_id as usize] = None;
         self.free_slots.push(task_id);
+    }
+
+    /// Remove a timer entry for `task_id` from the timer map.
+    fn cleanup_timer(&mut self, task_id: TaskId, deadline: u64) {
+        if let Some(tids) = self.timers.get_mut(&deadline) {
+            tids.retain(|id| *id != task_id);
+            if tids.is_empty() {
+                self.timers.remove(&deadline);
+            }
+        }
     }
 
     fn enqueue(&mut self, task_id: TaskId) {
@@ -716,11 +723,22 @@ impl Executor {
                 CURRENT_POLLING_TASK.with(|c| c.set(None));
                 crate::scope::set_scope_direct(prev_scope);
 
+                // Extract timer_deadline before state is dropped, so
+                // we can clean up the timer entry (free_slot can't
+                // read it because the slot is already None).
+                let timer_dl = state.timer_deadline;
+
                 match result {
                     Ok(Poll::Ready(())) => {
+                        if timer_dl != 0 {
+                            ex.borrow_mut().cleanup_timer(tid, timer_dl);
+                        }
                         ex.borrow_mut().free_slot(tid);
                     }
                     Err(payload) => {
+                        if timer_dl != 0 {
+                            ex.borrow_mut().cleanup_timer(tid, timer_dl);
+                        }
                         // Notify the panic hook (if any) before freeing the slot.
                         let hook = ex.borrow().panic_hook.clone();
                         if let Some(h) = hook {
@@ -1077,16 +1095,9 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
                 }
             }
         }
-        // Clean up timer entries (requires mutable borrow, separate pass).
-        // O(n) retain per deadline is acceptable because timer lists per
-        // deadline are tiny (typically 1-2 entries in single-threaded use).
+        // Clean up timer entries.
         for (dl, tid) in &timer_deadlines {
-            if let Some(tids) = ex.timers.get_mut(dl) {
-                tids.retain(|id| id != tid);
-                if tids.is_empty() {
-                    ex.timers.remove(dl);
-                }
-            }
+            ex.cleanup_timer(*tid, *dl);
         }
 
         for slot in &mut ex.tasks {
