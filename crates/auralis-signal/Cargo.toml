@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 description = "Reactive signal primitive with version tracking and proactive waker deregistration"
+repository.workspace = true
 
 [features]
 default = []
