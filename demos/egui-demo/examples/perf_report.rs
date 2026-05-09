@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use auralis_signal::{Memo, Signal};
+use auralis_signal::Signal;
 
 // ---- Copied from data_gen.rs ----
 use rand::rngs::StdRng;
@@ -172,19 +172,17 @@ fn main() {
         let filter_params = Signal::new(FilterParams::default());
         let mode_sig = Signal::new(AggregateMode::Median);
 
-        let rd = raw_data.clone();
-        let fp = filter_params.clone();
-        let filtered_memo = Memo::new(move || filter_data(&rd.read(), &fp.read()));
+        let filtered_memo = auralis_signal::memo!(raw_data, filter_params =>
+            filter_data(&raw_data.read(), &filter_params.read())
+        );
 
-        let fm = filtered_memo.clone();
-        let ms = mode_sig.clone();
-        let agg_memo = Memo::new(move || aggregate(&fm.read(), ms.read()));
+        let agg_memo = auralis_signal::memo!(filtered_memo, mode_sig =>
+            aggregate(&filtered_memo.read(), mode_sig.read())
+        );
 
-        let am = agg_memo.clone();
-        let output_memo = Memo::new(move || {
-            let (m, p) = am.read();
-            format_results(&m, &p)
-        });
+        let output_memo = auralis_signal::memo!(agg_memo =>
+            { let (m, p) = agg_memo.read(); format_results(&m, &p) }
+        );
 
         // First read: all Memos are clean (constructed during new)
         let start = Instant::now();
@@ -338,17 +336,15 @@ fn main() {
         let fp_sig = Signal::new(params_a.clone());
         let mode_s = Signal::new(AggregateMode::Median);
 
-        let rs = raw_sig.clone();
-        let fs = fp_sig.clone();
-        let fm = Memo::new(move || filter_data(&rs.read(), &fs.read()));
-        let fm2 = fm.clone();
-        let ms = mode_s.clone();
-        let am = Memo::new(move || aggregate(&fm2.read(), ms.read()));
-        let am2 = am.clone();
-        let om = Memo::new(move || {
-            let (m, p) = am2.read();
-            format_results(&m, &p)
-        });
+        let fm = auralis_signal::memo!(raw_sig, fp_sig =>
+            filter_data(&raw_sig.read(), &fp_sig.read())
+        );
+        let am = auralis_signal::memo!(fm, mode_s =>
+            aggregate(&fm.read(), mode_s.read())
+        );
+        let om = auralis_signal::memo!(am =>
+            { let (m, p) = am.read(); format_results(&m, &p) }
+        );
 
         let start = Instant::now();
         for i in 0..frames {
@@ -416,23 +412,15 @@ fn main() {
     let rs = Signal::new(data.clone());
     let fs = Signal::new(params_a.clone());
     let ms = Signal::new(AggregateMode::Median);
-    let fm = Memo::new({
-        let rs = rs.clone();
-        let fs = fs.clone();
-        move || filter_data(&rs.read(), &fs.read())
-    });
-    let am = Memo::new({
-        let fm = fm.clone();
-        let ms = ms.clone();
-        move || aggregate(&fm.read(), ms.read())
-    });
-    let om = Memo::new({
-        let am = am.clone();
-        move || {
-            let (m, p) = am.read();
-            format_results(&m, &p)
-        }
-    });
+    let fm = auralis_signal::memo!(rs, fs =>
+        filter_data(&rs.read(), &fs.read())
+    );
+    let am = auralis_signal::memo!(fm, ms =>
+        aggregate(&fm.read(), ms.read())
+    );
+    let om = auralis_signal::memo!(am =>
+        { let (m, p) = am.read(); format_results(&m, &p) }
+    );
     let _ = om.read(); // initial compute
     let start = Instant::now();
     let _ = om.read();

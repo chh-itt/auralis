@@ -14,8 +14,8 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -201,6 +201,21 @@ pub struct Executor {
     time_budget_ms: u64,
     /// Optional hook invoked when a spawned task panics.
     panic_hook: Option<Rc<dyn Fn(PanicInfo)>>,
+    /// Timer queue: map from deadline (ms) to task ids that should be
+    /// woken when that deadline expires.  Processed at the start of
+    /// every flush.
+    timers: BTreeMap<u64, Vec<TaskId>>,
+}
+
+// Set by the executor before polling a task, cleared afterward.
+// Lets futures discover their task id without threading it through
+// layers of combinators.
+thread_local! {
+    static CURRENT_POLLING_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
+}
+
+pub(crate) fn with_current_polling_task<R>(f: impl FnOnce(Option<TaskId>) -> R) -> R {
+    CURRENT_POLLING_TASK.with(|c| f(c.get()))
 }
 
 struct DeferredOp {
@@ -223,6 +238,7 @@ impl Executor {
             time_source: None,
             time_budget_ms: 8,
             panic_hook: None,
+            timers: BTreeMap::new(),
         }
     }
 
@@ -347,6 +363,21 @@ impl Executor {
         ex.borrow_mut().panic_hook = Some(hook);
     }
 
+    /// Register a timer: when `now_ms() >= deadline_ms`, enqueue
+    /// `task_id` so it gets polled on the next flush.
+    pub(crate) fn schedule_timer(ex: &Rc<RefCell<Executor>>, deadline_ms: u64, task_id: TaskId) {
+        let mut e = ex.borrow_mut();
+        e.timers.entry(deadline_ms).or_default().push(task_id);
+        // Request a flush so the timer is checked.
+        e.is_flush_scheduled = false;
+        let maybe_sched = e.try_schedule_flush();
+        drop(e);
+        if let Some(sched) = maybe_sched {
+            let ex2 = Rc::clone(ex);
+            sched.schedule(Box::new(move || Self::flush_instance(&ex2)));
+        }
+    }
+
     /// Spawn a future on this executor instance.
     pub fn spawn(ex: &Rc<RefCell<Executor>>, future: impl Future<Output = ()> + 'static) {
         let maybe_sched = {
@@ -390,6 +421,22 @@ impl Executor {
                 return;
             }
             e.in_flush = true;
+        }
+
+        // Step 0: drain expired timers.
+        {
+            let mut e = ex.borrow_mut();
+            let now = e.now_ms();
+            if now > 0 {
+                let expired: Vec<u64> = e.timers.keys().copied().take_while(|&d| d <= now).collect();
+                for deadline in expired {
+                    if let Some(tasks) = e.timers.remove(&deadline) {
+                        for tid in tasks {
+                            e.enqueue(tid);
+                        }
+                    }
+                }
+            }
         }
 
         // Step 1: deferred ops.
@@ -468,6 +515,9 @@ impl Executor {
                     crate::scope::set_scope_direct(scope);
                 }
 
+                // Let futures discover their task id (used by timer::sleep).
+                CURRENT_POLLING_TASK.with(|c| c.set(Some(tid)));
+
                 // Task isolation (non-Wasm).
                 #[cfg(not(target_arch = "wasm32"))]
                 let result: Result<Poll<()>, Box<dyn std::any::Any + Send>> =
@@ -477,6 +527,7 @@ impl Executor {
                 #[cfg(target_arch = "wasm32")]
                 let poll = state.future.as_mut().poll(&mut cx);
 
+                CURRENT_POLLING_TASK.with(|c| c.set(None));
                 crate::scope::set_scope_direct(prev_scope);
 
                 #[cfg(not(target_arch = "wasm32"))]
@@ -612,6 +663,20 @@ pub fn with_executor<R>(ex: &ExecutorRef, f: impl FnOnce() -> R) -> R {
 /// callers should fall back to the global thread-local executor.
 fn current_executor() -> Option<ExecutorRef> {
     CURRENT_EXECUTOR.with(|exec| exec.borrow().clone())
+}
+
+/// Return the currently active executor instance.
+///
+/// If [`with_executor`] was used to set an instance executor, returns
+/// that; otherwise returns the global thread-local executor.
+pub(crate) fn current_executor_instance() -> ExecutorRef {
+    current_executor().unwrap_or_else(|| EXECUTOR.with(Rc::clone))
+}
+
+/// Return the current time in milliseconds from the active executor's
+/// [`TimeSource`], or 0 if none is installed.
+pub(crate) fn current_time_ms() -> u64 {
+    current_executor_instance().borrow().now_ms()
 }
 
 // ---------------------------------------------------------------------------

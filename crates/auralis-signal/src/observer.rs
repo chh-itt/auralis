@@ -22,10 +22,10 @@ use crate::memo::SignalKey;
 pub(crate) struct ObserverState {
     /// Callback to mark the observer dirty when a source signal changes.
     pub dirty_callback: Rc<dyn Fn()>,
-    /// Called with an unsubscribe closure each time a new source
-    /// dependency is subscribed.  The observer stores these for cleanup
-    /// on drop or before the next recomputation.
-    pub on_subscribe: Rc<dyn Fn(Box<dyn FnOnce()>)>,
+    /// Called with the signal key and an unsubscribe closure each time
+    /// a new source dependency is subscribed.  The observer stores these
+    /// for cleanup on drop or for incremental diff during recomputation.
+    pub on_subscribe: Rc<dyn Fn(SignalKey, Box<dyn FnOnce()>)>,
     /// Set of already-subscribed signal pointers for deduplication.
     /// Prevents double-subscribing when the same signal is read
     /// multiple times within a single compute invocation.

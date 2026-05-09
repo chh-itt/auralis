@@ -13,9 +13,10 @@
 //!     cheap flag flip).  No computation happens yet — the memo is
 //!     **lazy**.
 //! 3.  `Memo::read()` / `Memo::with()` checks the dirty flag.  If
-//!     dirty, it re-runs `compute` (which tears down old subscriptions,
-//!     re-installs the observer, and discovers the current dependency
-//!     set).  The internal [`Signal`] is updated and dirty is cleared.
+//!     dirty, it re-runs `compute` (which incrementally updates
+//!     subscriptions — only unsubscribing from removed dependencies
+//!     and subscribing to new ones).  The internal [`Signal`] is
+//!     updated and dirty is cleared.
 //! 4.  `Memo::drop()` runs all stored cleanup closures, unsubscribing
 //!     from every source signal.
 
@@ -28,7 +29,10 @@ use crate::observer::{ObserverState, OBSERVER};
 use crate::signal::Signal;
 
 type CleanupFn = Box<dyn FnOnce()>;
-type SubscriptionList = Rc<RefCell<Vec<CleanupFn>>>;
+/// Each entry pairs a [`SignalKey`] with its unsubscribe closure.
+/// The key enables incremental diff during recomputation: shared
+/// dependencies are kept, only removed/new ones are updated.
+type SubscriptionList = Rc<RefCell<Vec<(SignalKey, CleanupFn)>>>;
 
 /// Opaque key for deduplicating observer subscriptions.
 ///
@@ -37,7 +41,7 @@ type SubscriptionList = Rc<RefCell<Vec<CleanupFn>>>;
 /// raw pointer to make the opaque-identifier intent obvious — this is
 /// safe because `Signal<T>` is `!Send + !Sync`, so the `Rc` allocation
 /// never moves to another thread and its address is a stable identity.
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
 pub(crate) struct SignalKey {
     addr: usize,
 }
@@ -190,14 +194,18 @@ impl<T: Clone + 'static> Memo<T> {
     // internals
     // ------------------------------------------------------------------
 
-    /// Re-run the compute function, tearing down old subscriptions and
-    /// discovering new ones.
+    /// Re-run the compute function, incrementally updating subscriptions.
+    ///
+    /// Dependencies that appear in both the old and new subscription sets
+    /// are kept — their unsubscribe closures are reused, avoiding churn
+    /// on the signal's subscriber list.  Only removed dependencies are
+    /// unsubscribed; only genuinely new dependencies trigger a fresh
+    /// subscribe call.
     ///
     /// # Panic safety
     ///
     /// Old subscriptions are kept alive during compute.  New subscriptions
-    /// are collected into a temporary list.  On success the old set is
-    /// drained and replaced by the new one.  If `compute` panics, only
+    /// are collected into a temporary list.  If `compute` panics, only
     /// the partial *new* subscriptions are cleaned up — the old set
     /// stays intact, keeping the memo connected to its sources.
     /// The `computing` flag suppresses `bump_version` during compute
@@ -225,13 +233,44 @@ impl<T: Clone + 'static> Memo<T> {
 
         match result {
             Ok(new_value) => {
-                // Compute succeeded — drain old subscriptions and
-                // move the new ones into place.
+                // --- Incremental subscription diff ---
+                //
+                // Build a set of new SignalKeys for O(1) lookup.
+                // Iterate old subscriptions in one pass, partitioning
+                // into "keep" (shared) and "remove" (no longer a dep).
+                // Then add truly new subscriptions (in new_subs but
+                // not in old_keys).
+                let new_keys: HashSet<SignalKey> =
+                    new_subs.borrow().iter().map(|(k, _)| *k).collect();
+
                 let mut old = self.subscriptions.borrow_mut();
-                for cleanup in old.drain(..) {
-                    cleanup();
+                let old_subs: Vec<(SignalKey, CleanupFn)> = std::mem::take(&mut *old);
+
+                let old_keys: HashSet<SignalKey> =
+                    old_subs.iter().map(|(k, _)| *k).collect();
+
+                let mut keep = Vec::with_capacity(old_subs.len().max(new_keys.len()));
+                for (key, cleanup) in old_subs {
+                    if new_keys.contains(&key) {
+                        keep.push((key, cleanup)); // shared — reuse
+                    } else {
+                        cleanup(); // removed dependency — unsubscribe
+                    }
                 }
-                old.extend(new_subs.borrow_mut().drain(..));
+
+                // Add genuinely new subscriptions; unsubscribe duplicates.
+                for (key, cleanup) in new_subs.borrow_mut().drain(..) {
+                    if !old_keys.contains(&key) {
+                        keep.push((key, cleanup));
+                    } else {
+                        // Same SignalKey → old subscription is already
+                        // in `keep`.  Drop this duplicate to avoid
+                        // accumulating subscribers on the source signal.
+                        cleanup();
+                    }
+                }
+
+                *old = keep;
                 drop(old);
 
                 self.signal.set(new_value);
@@ -243,7 +282,7 @@ impl<T: Clone + 'static> Memo<T> {
                 // Compute panicked — clean up partial new subscriptions.
                 // Old subscriptions are untouched, so the memo stays
                 // connected to its previous source set.
-                for cleanup in new_subs.borrow_mut().drain(..) {
+                for (_, cleanup) in new_subs.borrow_mut().drain(..) {
                     cleanup();
                 }
                 self.computing.set(false);
@@ -323,8 +362,8 @@ fn run_compute<T: Clone + 'static>(
                 }
             }
         }),
-        on_subscribe: Rc::new(move |cleanup: Box<dyn FnOnce()>| {
-            subs.borrow_mut().push(cleanup);
+        on_subscribe: Rc::new(move |key: SignalKey, cleanup: Box<dyn FnOnce()>| {
+            subs.borrow_mut().push((key, cleanup));
         }),
         seen: seen2,
     };
@@ -343,7 +382,7 @@ fn run_compute<T: Clone + 'static>(
 
 impl<T> Drop for Memo<T> {
     fn drop(&mut self) {
-        for cleanup in self.subscriptions.borrow_mut().drain(..) {
+        for (_, cleanup) in self.subscriptions.borrow_mut().drain(..) {
             cleanup();
         }
     }

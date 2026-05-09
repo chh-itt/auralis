@@ -35,6 +35,39 @@ mod memo;
 mod observer;
 mod signal;
 
+/// Create a [`Memo`] with automatic clone of captured identifiers.
+///
+/// Instead of manually cloning every signal before the `move` closure:
+///
+/// ```
+/// use auralis_signal::{Signal, Memo};
+///
+/// let a = Signal::new(1);
+/// let b = Signal::new(2);
+///
+/// // Without the macro:
+/// let sum = Memo::new({
+///     let a = a.clone();
+///     let b = b.clone();
+///     move || a.read() + b.read()
+/// });
+///
+/// // With the macro:
+/// let sum = auralis_signal::memo!(a, b => a.read() + b.read());
+/// ```
+///
+/// The macro expands to the same pattern — a `move` closure with each
+/// captured identifier cloned into a local variable of the same name.
+#[macro_export]
+macro_rules! memo {
+    ($($capture:ident),+ $(,)? => $body:expr) => {
+        $crate::Memo::new({
+            $(let $capture = $capture.clone();)+
+            move || $body
+        })
+    };
+}
+
 pub use batch::{batch, in_batch};
 pub use future::{FilterChangedFuture, MapChangedFuture, SignalChangedFuture};
 pub use memo::Memo;

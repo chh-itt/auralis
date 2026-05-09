@@ -7,8 +7,8 @@ edition = "2021"
 description = "Side-by-side comparison: pure egui vs Auralis (Signal + Memo + TaskScope)"
 
 [dependencies]
-auralis-signal = "0.1.2"
-auralis-task = "0.1.2"
+auralis-signal = { path = "../../crates/auralis-signal" }
+auralis-task = { path = "../../crates/auralis-task" }
 eframe = "0.34"
 egui = "0.34"
 rand = "0.8"

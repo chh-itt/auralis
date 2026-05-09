@@ -35,6 +35,7 @@
 
 mod executor;
 mod scope;
+pub mod timer;
 
 #[cfg(feature = "debug")]
 mod debug;

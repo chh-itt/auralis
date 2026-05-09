@@ -246,17 +246,17 @@ impl WithAuralisAnalyzer {
         let filter_params = Signal::new(FilterParams::default());
         let aggregate_mode = Signal::new(AggregateMode::Median);
 
-        let rd = raw_data.clone();
-        let fp = filter_params.clone();
-        let filtered_data = Memo::new(move || filter_data(&rd.read(), &fp.read()));
+        let filtered_data = auralis_signal::memo!(raw_data, filter_params =>
+            filter_data(&raw_data.read(), &filter_params.read())
+        );
 
-        let fd = filtered_data.clone();
-        let am = aggregate_mode.clone();
-        let aggregated_result = Memo::new(move || aggregate(&fd.read(), am.read()));
+        let aggregated_result = auralis_signal::memo!(filtered_data, aggregate_mode =>
+            aggregate(&filtered_data.read(), aggregate_mode.read())
+        );
 
-        let ar = aggregated_result.clone();
-        let am2 = aggregate_mode.clone();
-        let formatted_output = Memo::new(move || format_results(&ar.read(), am2.read()));
+        let formatted_output = auralis_signal::memo!(aggregated_result, aggregate_mode =>
+            format_results(&aggregated_result.read(), aggregate_mode.read())
+        );
 
         Self {
             raw_data,

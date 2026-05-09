@@ -699,7 +699,7 @@ fn track_observer<T: 'static>(sig: &Signal<T>) {
                 unsubscribe(&signal, id);
             });
 
-            (observer.on_subscribe)(cleanup);
+            (observer.on_subscribe)(key, cleanup);
         }
     });
 }
