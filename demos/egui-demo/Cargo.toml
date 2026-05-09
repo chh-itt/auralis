@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "auralis-egui-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Side-by-side comparison: pure egui vs Auralis (Signal + Memo + TaskScope)"
+
+[dependencies]
+auralis-signal = "0.1.2"
+auralis-task = "0.1.2"
+eframe = "0.34"
+egui = "0.34"
+rand = "0.8"
+
+[profile.release]
+opt-level = 2
