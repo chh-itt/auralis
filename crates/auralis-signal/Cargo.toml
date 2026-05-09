@@ -1,0 +1,19 @@
+[package]
+name = "auralis-signal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reactive signal primitive with version tracking and proactive waker deregistration"
+
+[features]
+default = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "signal_bench"
+harness = false
+
+[dependencies]

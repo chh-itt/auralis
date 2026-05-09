@@ -1,0 +1,25 @@
+[package]
+name = "auralis-task"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoped async task runtime with cancellation and priority scheduling"
+
+[features]
+default = []
+debug = []
+ssr-tokio = ["dep:tokio"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "task_bench"
+harness = false
+
+[dependencies]
+auralis-signal.workspace = true
+
+# Optional — for SSR multi-request isolation with tokio task_local!
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros"] }
