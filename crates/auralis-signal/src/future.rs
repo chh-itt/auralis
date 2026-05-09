@@ -846,4 +846,59 @@ mod tests {
         assert!(call_count.get() >= 1);
         assert!(call_count.get() <= 2);
     }
+
+    #[test]
+    fn triple_reentrant_set() {
+        // Chain: set(1) → callback calls set(2) → callback calls set(3).
+        // The final value should be 3, and no infinite loop occurs.
+        let sig = Signal::new(0);
+        let sig1 = sig.clone();
+        let sig2 = sig.clone();
+
+        crate::subscribe(
+            &sig,
+            Rc::new(move || {
+                if sig1.read() == 1 {
+                    sig1.set(2);
+                }
+            }),
+        );
+        crate::subscribe(
+            &sig,
+            Rc::new(move || {
+                if sig2.read() == 2 {
+                    sig2.set(3);
+                }
+            }),
+        );
+
+        sig.set(1);
+        // set(1) → both callbacks fire → first sees 1, calls set(2)
+        // → second callback sees 2, calls set(3)
+        // → follow-ups drain each re-entrant change.
+        assert_eq!(sig.read(), 3);
+    }
+
+    #[test]
+    fn batch_panicking_notification_doesnt_drop_others() {
+        // A panicking notification inside a batch should not prevent
+        // other queued notifications from being delivered.
+        let a = Signal::new(0);
+        let b = Signal::new(0);
+        let b_set = Rc::new(Cell::new(false));
+        let bs = Rc::clone(&b_set);
+
+        crate::subscribe(&a, Rc::new(move || panic!("intentional")));
+        crate::subscribe(&b, Rc::new(move || bs.set(true)));
+
+        // batch() catches subscriber panics internally via catch_unwind
+        // in BatchGuard::drop, so it does NOT propagate.
+        crate::batch(|| {
+            a.set(1);
+            b.set(2);
+        });
+        // b's subscriber should still have been notified despite a's
+        // subscriber panicking (each notification is isolated).
+        assert!(b_set.get());
+    }
 }

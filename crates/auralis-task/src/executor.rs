@@ -226,6 +226,9 @@ struct TaskState {
     future: Pin<Box<dyn Future<Output = ()> + 'static>>,
     priority: Priority,
     scope_id: u64,
+    /// Key in [`Executor::timers`] for this task's pending sleep,
+    /// or 0 if the task is not waiting on a timer.
+    timer_deadline: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +401,23 @@ fn ensure_global_registered() -> (u64, u64) {
                 weak,
                 generation: 0,
             });
+        } else {
+            // Verify slot 0 still holds the global executor.
+            // After reset_executor_for_test + new_instance, an
+            // instance executor may have claimed slot 0.
+            let global = EXECUTOR.with(Rc::clone);
+            let is_global = slots[0]
+                .weak
+                .upgrade()
+                .is_some_and(|ex| Rc::ptr_eq(&ex, &global));
+            if !is_global {
+                // Displace the intruder with a higher generation
+                // so old wakers targeting (0, old_gen) are rejected.
+                slots[0] = Slot {
+                    weak: Rc::downgrade(&global),
+                    generation: slots[0].generation.wrapping_add(1),
+                };
+            }
         }
         let gen = slots[0].generation;
         (0, gen)
@@ -466,6 +486,10 @@ impl Executor {
     pub(crate) fn schedule_timer(ex: &Rc<RefCell<Executor>>, deadline_ms: u64, task_id: TaskId) {
         let mut e = ex.borrow_mut();
         e.timers.entry(deadline_ms).or_default().push(task_id);
+        // Set the reverse index so cancel_scope_tasks can find this entry.
+        if let Some(Some(ref mut t)) = e.tasks.get_mut(task_id as usize) {
+            t.timer_deadline = deadline_ms;
+        }
         // Request a flush so the timer is checked.
         e.is_flush_scheduled = false;
         let maybe_sched = e.try_schedule_flush();
@@ -485,6 +509,7 @@ impl Executor {
                 future: Box::pin(future),
                 priority: Priority::Low,
                 scope_id: 0,
+                timer_deadline: 0,
             });
             e.enqueue(tid);
             e.try_schedule_flush()
@@ -538,6 +563,10 @@ impl Executor {
             if now == 0 {
                 for (_, tasks) in std::mem::take(&mut e.timers) {
                     for tid in tasks {
+                        // Clear the reverse index since the timer has fired.
+                        if let Some(Some(ref mut t)) = e.tasks.get_mut(tid as usize) {
+                            t.timer_deadline = 0;
+                        }
                         e.enqueue(tid);
                     }
                 }
@@ -547,6 +576,9 @@ impl Executor {
                 for deadline in expired {
                     if let Some(tasks) = e.timers.remove(&deadline) {
                         for tid in tasks {
+                            if let Some(Some(ref mut t)) = e.tasks.get_mut(tid as usize) {
+                                t.timer_deadline = 0;
+                            }
                             e.enqueue(tid);
                         }
                     }
@@ -974,6 +1006,7 @@ fn spawn_inner(
                 future,
                 priority,
                 scope_id,
+                timer_deadline: 0,
             });
             ex.enqueue(task_id);
             let sched = ex.try_schedule_flush();
@@ -1022,6 +1055,25 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
     EXECUTOR.with(|exec| {
         let mut ex = exec.borrow_mut();
         let mut dropped = Vec::new();
+
+        // Collect timer deadlines for scope tasks before mutating timers.
+        let mut timer_deadlines: Vec<(u64, TaskId)> = Vec::new();
+        for (tid, slot) in ex.tasks.iter().enumerate() {
+            if let Some(ref t) = slot {
+                if t.scope_id == scope_id && t.timer_deadline != 0 {
+                    timer_deadlines.push((t.timer_deadline, tid as TaskId));
+                }
+            }
+        }
+        // Clean up timer entries (requires mutable borrow, separate pass).
+        for (dl, tid) in &timer_deadlines {
+            if let Some(tids) = ex.timers.get_mut(dl) {
+                tids.retain(|id| id != tid);
+                if tids.is_empty() {
+                    ex.timers.remove(dl);
+                }
+            }
+        }
 
         for slot in &mut ex.tasks {
             if let Some(ref t) = slot {
@@ -1245,6 +1297,7 @@ pub(crate) fn spawn_no_auto_flush(
             future: Box::pin(future),
             priority,
             scope_id: 0,
+            timer_deadline: 0,
         });
         ex.enqueue(task_id);
         // Do NOT schedule flush.

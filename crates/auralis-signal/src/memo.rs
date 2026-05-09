@@ -676,4 +676,21 @@ mod tests {
         let _ = clone.read();
         assert_eq!(memo.compute_count(), 3);
     }
+
+    #[test]
+    fn memo_with_signalmap_tracks_dependency() {
+        // SignalMap::with must trigger observer tracking so that a
+        // memo depending on a SignalMap is marked dirty correctly.
+        let source = Signal::new(42);
+        let sm = source.map(|v: &i32| *v);
+        let sm2 = sm.clone();
+
+        let memo = Memo::new(move || sm2.with(|v| *v));
+
+        assert_eq!(memo.read(), 42);
+        source.set(99);
+        // The memo must be dirty because it reads through SignalMap::with.
+        assert!(memo.is_dirty());
+        assert_eq!(memo.read(), 99);
+    }
 }
