@@ -1590,6 +1590,82 @@ mod tests {
         assert_eq!(sig.read(), 42);
     }
 
+    // -- defensive / API coverage --------------------------------------
+
+    #[test]
+    fn panic_hook_is_invoked_on_task_panic() {
+        init();
+        let hook_called = Rc::new(Cell::new(false));
+        let hc = Rc::clone(&hook_called);
+
+        crate::set_panic_hook(Rc::new(move |_info| {
+            hc.set(true);
+        }));
+
+        let scope = TaskScope::new();
+        scope.spawn(async move { panic!("intentional") });
+
+        // The panic hook should have been called.
+        assert!(hook_called.get());
+    }
+
+    #[test]
+    fn current_scope_available_in_spawned_task() {
+        init();
+        let scope = TaskScope::new();
+        let found = Rc::new(Cell::new(false));
+        let f = Rc::clone(&found);
+        scope.spawn(async move {
+            f.set(crate::current_scope().is_some());
+        });
+        assert!(found.get());
+    }
+
+    #[test]
+    fn callback_handle_noop_does_not_panic() {
+        let _h = crate::CallbackHandle::noop();
+        // Dropping should not panic.
+    }
+
+    #[test]
+    fn sync_callback_fallback_without_schedule_hook() {
+        // When no ScheduleFlush hook is installed, signal callbacks
+        // fire synchronously inside set() (the executor_schedule fallback).
+        crate::reset_executor_for_test();
+        // No init_flush_scheduler call — hook is absent.
+
+        let sig = Signal::new(0);
+        let called = Rc::new(Cell::new(false));
+        let c = Rc::clone(&called);
+        auralis_signal::subscribe(&sig, Rc::new(move || c.set(true)));
+
+        sig.set(1);
+        // Without a hook, the callback fires synchronously.
+        assert!(called.get());
+    }
+
+    #[test]
+    fn set_deferred_isolated_to_instance_executor() {
+        init();
+        let ex1 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex1, Rc::new(TestScheduleFlush));
+        let ex2 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex2, Rc::new(TestScheduleFlush));
+
+        let sig1 = Signal::new(0);
+        let sig2 = Signal::new(0);
+        let s1 = sig1.clone();
+
+        // Spawn on ex1: use set_deferred via with_executor.
+        crate::with_executor(&ex1, || {
+            crate::set_deferred(&s1, 42);
+        });
+        Executor::flush_instance(&ex1);
+        assert_eq!(sig1.read(), 42);
+        // sig2 must be unaffected — set_deferred was on ex1.
+        assert_eq!(sig2.read(), 0);
+    }
+
     #[test]
     fn notify_signal_state_follow_up_handles_reentrant_dirty() {
         // When a signal subscriber callback calls set() on the same

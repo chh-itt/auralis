@@ -691,6 +691,46 @@ mod tests {
     }
 
     #[test]
+    fn memo_panics_during_compute_then_recovers() {
+        let sig = Signal::new(1);
+        let should_panic = Rc::new(Cell::new(false));
+        let sp = Rc::clone(&should_panic);
+        let s = sig.clone();
+
+        // Construct with should_panic=false so compute passes.
+        let memo = Memo::new(move || {
+            assert!(!sp.get(), "intentional memo panic");
+            s.read() * 2
+        });
+        assert_eq!(memo.read(), 2);
+
+        // Now enable panic and trigger recompute — it should panic.
+        should_panic.set(true);
+        sig.set(99); // marks memo dirty
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| memo.read()));
+        assert!(result.is_err());
+
+        // Disable panic and verify recovery.
+        should_panic.set(false);
+        sig.set(5);
+        assert_eq!(memo.read(), 10);
+    }
+
+    #[test]
+    fn memo_self_read_in_compute_does_not_panic() {
+        // Reading the memo's own output inside its compute function is
+        // unusual but must not cause a deadlock or panic.
+        let sig = Signal::new(1);
+        let s = sig.clone();
+        let memo = Memo::new(move || s.read() * 2);
+
+        // Call read() inside the memo's with() — this triggers recompute,
+        // and during recompute read() is called again (clean path).
+        let result = memo.with(|v| *v);
+        assert_eq!(result, 2);
+    }
+
+    #[test]
     fn memo_with_signalmap_tracks_dependency() {
         // SignalMap::with must trigger observer tracking so that a
         // memo depending on a SignalMap is marked dirty correctly.

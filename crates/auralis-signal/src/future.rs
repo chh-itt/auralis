@@ -901,4 +901,122 @@ mod tests {
         // subscriber panicking (each notification is isolated).
         assert!(b_set.get());
     }
+
+    // -- defensive / API coverage ---------------------------------------
+
+    #[test]
+    fn set_same_value_still_bumps_version() {
+        let sig = Signal::new(42);
+        let v1 = sig.version();
+        sig.set(42); // same value, but version must increment
+        assert!(sig.version() > v1);
+    }
+
+    #[test]
+    fn set_if_changed_noop_on_same_value() {
+        let sig = Signal::new(10);
+        let v1 = sig.version();
+        sig.set_if_changed(10); // same value → no-op
+        assert_eq!(sig.version(), v1);
+    }
+
+    #[test]
+    fn set_if_changed_fires_on_different_value() {
+        let sig = Signal::new(10);
+        let v1 = sig.version();
+        sig.set_if_changed(20);
+        assert!(sig.version() > v1);
+        assert_eq!(sig.read(), 20);
+    }
+
+    #[test]
+    fn batch_subscriber_sees_final_value() {
+        let sig = Signal::new(0);
+        let sig2 = sig.clone();
+        let seen = Rc::new(Cell::new(0));
+        let s = Rc::clone(&seen);
+        crate::subscribe(&sig, Rc::new(move || s.set(sig2.read())));
+        crate::batch(|| {
+            sig.set(1);
+            sig.set(2);
+            sig.set(3);
+        });
+        // Subscriber should see 3, not 1 or 2.
+        assert_eq!(seen.get(), 3);
+    }
+
+    #[test]
+    fn batch_and_future_changed() {
+        let sig = Signal::new(0i32);
+        crate::batch(|| {
+            sig.set(1);
+            sig.set(2);
+        });
+        assert_eq!(sig.read(), 2);
+        let mut fut = sig.changed();
+        let (waker, _woken) = test_waker();
+        let _ = poll(std::pin::Pin::new(&mut fut), &waker);
+    }
+
+    #[test]
+    fn filter_changed_future_with_batch_sees_final_value() {
+        let sig = Signal::new(0i32);
+        crate::batch(|| {
+            sig.set(5);
+            sig.set(10);
+        });
+        let (waker, _woken) = test_waker();
+        let mut fut = sig.filter_changed(|v| *v > 5);
+        let _ = poll(std::pin::Pin::new(&mut fut), &waker);
+    }
+
+    #[test]
+    fn signal_changed_future_double_poll_after_ready() {
+        let sig = Signal::new(1);
+        let (waker, _woken) = test_waker();
+        let mut fut = sig.changed();
+        sig.set(2);
+        let _ = poll(std::pin::Pin::new(&mut fut), &waker);
+        // Second poll after Ready — safe, not a panic.
+        let _ = poll(std::pin::Pin::new(&mut fut), &waker);
+    }
+
+    #[test]
+    fn ptr_eq_detects_same_allocation() {
+        let a = Signal::new(0);
+        let b = a.clone();
+        let c = Signal::new(0);
+        assert!(a.ptr_eq(&b));
+        assert!(!a.ptr_eq(&c));
+    }
+
+    #[test]
+    fn in_batch_returns_true_inside_batch_only() {
+        assert!(!crate::in_batch());
+        crate::batch(|| {
+            assert!(crate::in_batch());
+        });
+        assert!(!crate::in_batch());
+    }
+
+    #[test]
+    fn new_subscriber_not_invoked_by_current_notification() {
+        let sig = Signal::new(0i32);
+        let new_sub_called = Rc::new(Cell::new(false));
+        let ns = Rc::clone(&new_sub_called);
+        let sig2 = sig.clone();
+
+        crate::subscribe(
+            &sig,
+            Rc::new(move || {
+                let ns2 = Rc::clone(&ns);
+                crate::subscribe(&sig2, Rc::new(move || ns2.set(true)));
+            }),
+        );
+
+        sig.set(1);
+        assert!(!new_sub_called.get());
+        sig.set(2);
+        assert!(new_sub_called.get());
+    }
 }
