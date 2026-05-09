@@ -656,8 +656,18 @@ impl Clone for TaskScope {
 impl Drop for TaskScope {
     fn drop(&mut self) {
         let Ok(mut inner) = self.inner.try_borrow_mut() else {
-            // Already borrowed; another clone of this scope will handle
-            // the cancellation when it drops.
+            // Already borrowed — this is a re-entrant drop (e.g. a
+            // callback held the last clone of this scope).  If this
+            // was the last clone, resources will leak.
+            #[cfg(debug_assertions)]
+            {
+                eprintln!(
+                    "[auralis-task] WARNING: TaskScope::drop cannot borrow inner \
+                     (already borrowed). If this was the last clone, tasks and \
+                     callbacks will leak. Avoid dropping the last TaskScope clone \
+                     inside a callback or during executor flush."
+                );
+            }
             return;
         };
         if inner.cancelled {

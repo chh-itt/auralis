@@ -32,7 +32,7 @@ impl SleepFuture {
 impl Future for SleepFuture {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
         if self.registered {
             return Poll::Ready(());
         }
@@ -57,9 +57,9 @@ impl Future for SleepFuture {
             task_id,
         );
 
-        // Re-register the waker so the executor can wake us.
-        cx.waker().wake_by_ref();
-
+        // Don't self-wake — the executor will re-poll this task when
+        // the timer expires (flush step 0).  Without a TimeSource all
+        // timers expire on the next flush (equivalent to yield_now).
         Poll::Pending
     }
 }

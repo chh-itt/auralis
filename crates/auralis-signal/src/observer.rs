@@ -29,7 +29,13 @@ pub(crate) struct ObserverState {
     /// Set of already-subscribed signal pointers for deduplication.
     /// Prevents double-subscribing when the same signal is read
     /// multiple times within a single compute invocation.
+    /// Pre-populated with old dependencies before compute so that
+    /// shared signals are not re-subscribed on every recomputation.
     pub seen: Rc<RefCell<HashSet<SignalKey>>>,
+    /// Old dependency keys that were actually re-read during this
+    /// compute.  Used together with `new_subs` to determine which
+    /// subscriptions to keep after recompute.
+    pub re_read: Rc<RefCell<HashSet<SignalKey>>>,
 }
 
 thread_local! {

@@ -34,7 +34,11 @@ impl Drop for BatchGuard {
                 let notifications: Vec<Box<dyn FnOnce()>> =
                     BATCHED_NOTIFICATIONS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
                 for notification in notifications {
-                    executor_schedule(notification);
+                    // Each notification is isolated — a panic in one
+                    // won't drop the remaining queued notifications.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        executor_schedule(notification);
+                    }));
                 }
             } else {
                 c.set(depth - 1);

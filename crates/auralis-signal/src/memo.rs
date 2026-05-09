@@ -117,7 +117,7 @@ impl<T: Clone + 'static> Memo<T> {
 
         let holder: Rc<RefCell<Option<Signal<T>>>> = Rc::new(RefCell::new(None));
 
-        let (value, _read_keys) = run_compute(
+        let (value, _, _) = run_compute(
             &compute,
             &dirty,
             &subscriptions,
@@ -250,29 +250,32 @@ impl<T: Clone + 'static> Memo<T> {
         }));
 
         match result {
-            Ok((new_value, read_keys)) => {
+            Ok((new_value, _all_seen, re_read_keys)) => {
                 // --- Incremental subscription diff ---
                 //
-                // `read_keys` contains every signal that was actually
-                // read during compute (including pre-seen ones that the
-                // observer skipped subscribing to).
+                // `re_read_keys`: old dependencies that were actually
+                // re-accessed during this compute.
                 //
-                // Old subscriptions whose key is in `read_keys` are
-                // kept (they were re-read and are still dependencies).
-                // Old subscriptions whose key is NOT in `read_keys`
-                // are removed (no longer read by the compute function).
+                // `new_subs`: subscriptions for signals that were NOT
+                // in pre-seen (genuinely new dependencies).
                 //
-                // `new_subs` contains only subscriptions for signals
-                // that were NOT in pre-seen (genuinely new deps).
+                // Effective read set = new_subs_keys ∪ re_read_keys.
+                // Old subscriptions in this set are kept; those not in
+                // it are removed (no longer dependencies).
+
+                let new_keys: HashSet<SignalKey> =
+                    new_subs.borrow().iter().map(|(k, _)| *k).collect();
+                let effective_read: HashSet<SignalKey> =
+                    new_keys.union(&re_read_keys).copied().collect();
 
                 let mut old = self.subscriptions.borrow_mut();
                 let old_subs: Vec<(SignalKey, CleanupFn)> = std::mem::take(&mut *old);
 
                 let old_keys: HashSet<SignalKey> = old_subs.iter().map(|(k, _)| *k).collect();
 
-                let mut keep = Vec::with_capacity(old_subs.len().max(read_keys.len()));
+                let mut keep = Vec::with_capacity(old_subs.len().max(effective_read.len()));
                 for (key, cleanup) in old_subs {
-                    if read_keys.contains(&key) {
+                    if effective_read.contains(&key) {
                         keep.push((key, cleanup)); // still a dependency
                     } else {
                         cleanup(); // no longer read — unsubscribe
@@ -358,7 +361,7 @@ fn run_compute<T: Clone + 'static>(
     signal_holder: &Rc<RefCell<Option<Signal<T>>>>,
     computing: &Rc<Cell<bool>>,
     pre_seen: &HashSet<SignalKey>,
-) -> (T, HashSet<SignalKey>) {
+) -> (T, HashSet<SignalKey>, HashSet<SignalKey>) {
     let dirty2 = Rc::clone(dirty);
     let subs = Rc::clone(subscriptions);
     let holder = Rc::clone(signal_holder);
@@ -370,13 +373,13 @@ fn run_compute<T: Clone + 'static>(
     let seen: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(pre_seen.clone()));
     let seen2 = Rc::clone(&seen);
 
+    // Old keys that are actually re-read during this compute.
+    let re_read: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(HashSet::new()));
+    let re_read2 = Rc::clone(&re_read);
+
     let observer = ObserverState {
         dirty_callback: Rc::new(move || {
             dirty2.set(true);
-            // Suppress version bumps while this memo is actively
-            // recomputing — old subscriptions are still live and
-            // could fire during compute, but we must not wake
-            // readers until the new value is ready.
             if !computing2.get() {
                 if let Some(ref sig) = *holder.borrow() {
                     sig.bump_version();
@@ -387,6 +390,7 @@ fn run_compute<T: Clone + 'static>(
             subs.borrow_mut().push((key, cleanup));
         }),
         seen: seen2,
+        re_read: re_read2,
     };
 
     // Save previous observer, install ours, restore on scope exit.
@@ -400,7 +404,8 @@ fn run_compute<T: Clone + 'static>(
     // _guard drops here, restoring the previous observer.
     let value = compute();
     let read_keys = seen.borrow().clone();
-    (value, read_keys)
+    let re_read_keys = re_read.borrow().clone();
+    (value, read_keys, re_read_keys)
 }
 
 impl<T> Drop for Memo<T> {

@@ -15,11 +15,10 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -121,16 +120,16 @@ impl TimeSource for TestTimeSource {
 struct TaskWaker {
     task_id: TaskId,
     priority: Priority,
-    /// Opaque id of the executor that owns this task.
-    /// Looked up via [`EXECUTOR_REGISTRY`] on wake.
-    executor_id: u64,
 }
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        let Some(exec) = lookup_executor(self.executor_id) else {
-            return;
-        };
+        // CURRENT_EXECUTOR is set during flush_instance for both global
+        // and instance executors.  If it's not set (e.g. a stale wake
+        // after the executor was dropped), fall back to the global
+        // thread-local executor.
+        let exec = current_executor().unwrap_or_else(|| EXECUTOR.with(Rc::clone));
+
         let maybe_sched = if let Ok(mut ex) = exec.try_borrow_mut() {
             match self.priority {
                 Priority::High => ex.high_queue.push_back(self.task_id),
@@ -143,18 +142,12 @@ impl Wake for TaskWaker {
             }
         } else {
             PENDING_WAKES.with(|pw| {
-                pw.borrow_mut()
-                    .push((self.task_id, self.priority, self.executor_id));
+                pw.borrow_mut().push((self.task_id, self.priority));
             });
             None
         };
         if let Some(sched) = maybe_sched {
-            let eid = self.executor_id;
-            sched.schedule(Box::new(move || {
-                if let Some(ex) = lookup_executor(eid) {
-                    Executor::flush_instance(&ex);
-                }
-            }));
+            sched.schedule(Box::new(flush));
         }
     }
 }
@@ -214,9 +207,6 @@ pub struct Executor {
     /// woken when that deadline expires.  Processed at the start of
     /// every flush.
     timers: BTreeMap<u64, Vec<TaskId>>,
-    /// Unique id for this executor, used by [`TaskWaker`] to route
-    /// wakes to the correct executor via [`EXECUTOR_REGISTRY`].
-    id: u64,
 }
 
 // Set by the executor before polling a task, cleared afterward.
@@ -224,47 +214,6 @@ pub struct Executor {
 // layers of combinators.
 thread_local! {
     static CURRENT_POLLING_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
-}
-
-// Maps executor ids to their instances so that TaskWaker (which is
-// Send + Sync and cannot hold an Rc) can route wakes to the correct
-// executor without unsafe code.
-static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
-
-thread_local! {
-    static EXECUTOR_REGISTRY: RefCell<HashMap<u64, ExecutorRef>> =
-        RefCell::new(HashMap::new());
-}
-
-fn register_executor(id: u64, ex: &ExecutorRef) {
-    EXECUTOR_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(id, Rc::clone(ex));
-    });
-}
-
-#[allow(dead_code)]
-fn unregister_executor(id: u64) {
-    EXECUTOR_REGISTRY.with(|reg| {
-        reg.borrow_mut().remove(&id);
-    });
-}
-
-/// Return the executor for `executor_id`, registering the global
-/// executor (id 0 or 1) on first access.
-fn lookup_executor(executor_id: u64) -> Option<ExecutorRef> {
-    EXECUTOR_REGISTRY.with(|reg| {
-        if let Some(ex) = reg.borrow().get(&executor_id) {
-            return Some(Rc::clone(ex));
-        }
-        // Lazy-register the global executor under id 1.
-        if executor_id <= 1 {
-            let global = EXECUTOR.with(Rc::clone);
-            global.borrow_mut().id = 1;
-            reg.borrow_mut().insert(1, Rc::clone(&global));
-            return Some(global);
-        }
-        None
-    })
 }
 
 pub(crate) fn with_current_polling_task<R>(f: impl FnOnce(Option<TaskId>) -> R) -> R {
@@ -292,7 +241,6 @@ impl Executor {
             time_budget_ms: 8,
             panic_hook: None,
             timers: BTreeMap::new(),
-            id: 0,
         }
     }
 
@@ -362,7 +310,7 @@ impl Executor {
 
 thread_local! {
     static EXECUTOR: Rc<RefCell<Executor>> = Rc::new(RefCell::new(Executor::new()));
-    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority, u64)>> =
+    static PENDING_WAKES: RefCell<Vec<(TaskId, Priority)>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -379,11 +327,7 @@ impl Executor {
     /// callbacks are routed to it.
     #[must_use]
     pub fn new_instance() -> Rc<RefCell<Executor>> {
-        let ex = Rc::new(RefCell::new(Executor::new()));
-        let id = NEXT_EXECUTOR_ID.fetch_add(1, Ordering::Relaxed);
-        ex.borrow_mut().id = id;
-        register_executor(id, &ex);
-        ex
+        Rc::new(RefCell::new(Executor::new()))
     }
 
     /// Install a flush scheduler on this executor instance.
@@ -482,6 +426,13 @@ impl Executor {
             e.in_flush = true;
         }
 
+        // Set this executor as the current one so that TaskWaker
+        // (which cannot hold an Rc) can discover it via thread-local.
+        // Restore on scope exit (including early returns for time-budget
+        // yielding and re-entrancy).
+        let prev_executor = CURRENT_EXECUTOR.with(|c| c.borrow_mut().replace(Rc::clone(ex)));
+        let _restore = RestoreExecutor(prev_executor);
+
         // Step 0: drain expired timers.
         {
             let mut e = ex.borrow_mut();
@@ -575,7 +526,6 @@ impl Executor {
                 let waker = Waker::from(Arc::new(TaskWaker {
                     task_id: tid,
                     priority,
-                    executor_id: ex.borrow().id,
                 }));
                 let mut cx = Context::from_waker(&waker);
 
@@ -673,6 +623,17 @@ impl Executor {
 
 type ExecutorRef = Rc<RefCell<Executor>>;
 
+/// RAII guard that restores the previous executor when dropped.
+struct RestoreExecutor(Option<ExecutorRef>);
+
+impl Drop for RestoreExecutor {
+    fn drop(&mut self) {
+        CURRENT_EXECUTOR.with(|c| {
+            *c.borrow_mut() = self.0.take();
+        });
+    }
+}
+
 thread_local! {
     static CURRENT_EXECUTOR: RefCell<Option<ExecutorRef>> = const { RefCell::new(None) };
 }
@@ -756,22 +717,24 @@ pub(crate) fn current_time_ms() -> u64 {
 fn drain_pending_wakes() {
     PENDING_WAKES.with(|pw| {
         let wakes = std::mem::take(&mut *pw.borrow_mut());
-        for (tid, priority, executor_id) in wakes {
-            let Some(exec) = lookup_executor(executor_id) else {
-                continue;
-            };
-            let maybe_sched = {
-                let mut ex = exec.borrow_mut();
+        if wakes.is_empty() {
+            return;
+        }
+        // Route to the current executor (set during flush_instance).
+        let exec = current_executor().unwrap_or_else(|| EXECUTOR.with(Rc::clone));
+        let maybe_sched = {
+            let mut ex = exec.borrow_mut();
+            for (tid, priority) in wakes {
                 match priority {
                     Priority::High => ex.high_queue.push_back(tid),
                     Priority::Low => ex.low_queue.push_back(tid),
                 }
-                ex.try_schedule_flush()
-            };
-            if let Some(sched) = maybe_sched {
-                let ex2 = Rc::clone(&exec);
-                sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
             }
+            ex.try_schedule_flush()
+        };
+        if let Some(sched) = maybe_sched {
+            let ex2 = Rc::clone(&exec);
+            sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
         }
     });
 }

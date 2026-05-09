@@ -678,7 +678,11 @@ fn track_observer<T: 'static>(sig: &Signal<T>) {
             {
                 let mut seen = observer.seen.borrow_mut();
                 if !seen.insert(key) {
-                    return; // already subscribed to this signal
+                    // Already in `seen` — this is an old dependency being
+                    // re-read.  Record it so the incremental diff knows to
+                    // keep its subscription.
+                    observer.re_read.borrow_mut().insert(key);
+                    return;
                 }
             }
 
