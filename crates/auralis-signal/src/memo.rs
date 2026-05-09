@@ -117,9 +117,6 @@ impl<T: Clone + 'static> Memo<T> {
 
         let holder: Rc<RefCell<Option<Signal<T>>>> = Rc::new(RefCell::new(None));
 
-        // Clear dirty before the initial compute, same as recompute().
-        dirty.set(false);
-
         let (value, _, _) = run_compute(
             &compute,
             &dirty,
@@ -141,6 +138,7 @@ impl<T: Clone + 'static> Memo<T> {
             compute_count,
         };
 
+        memo.dirty.set(false);
         memo.compute_count.set(1);
         memo
     }
@@ -226,12 +224,6 @@ impl<T: Clone + 'static> Memo<T> {
         }
         self.computing.set(true);
 
-        // Clear dirty before compute.  If a source signal changes
-        // re-entrantly during compute, the dirty callback will set
-        // it back to true and we will preserve that so the next
-        // read() triggers another recompute.
-        self.dirty.set(false);
-
         // Collect old keys so the observer can skip already-subscribed
         // signals, avoiding duplicate subscribe/unsubscribe churn on
         // shared dependencies.
@@ -301,9 +293,7 @@ impl<T: Clone + 'static> Memo<T> {
                 drop(old);
 
                 self.signal.set(new_value);
-                // dirty was cleared before compute; if a re-entrant
-                // source change set it back to true, it stays true
-                // so the next read() triggers another recompute.
+                self.dirty.set(false);
                 self.compute_count
                     .set(self.compute_count.get().wrapping_add(1));
             }
@@ -387,8 +377,16 @@ fn run_compute<T: Clone + 'static>(
 
     let observer = ObserverState {
         dirty_callback: Rc::new(move || {
-            dirty2.set(true);
+            // When computing is true, suppress both dirty and
+            // bump_version: the recompute in progress will incorporate
+            // any changes read before the source changed.  Changes
+            // after reads (re-entrant external sets) are rare —
+            // they require a synchronous callback in the no-hook
+            // fallback path.  Suppressing dirty here prevents nested
+            // memos from spuriously re-dirtying their parent after
+            // the parent already read the new value.
             if !computing2.get() {
+                dirty2.set(true);
                 if let Some(ref sig) = *holder.borrow() {
                     sig.bump_version();
                 }

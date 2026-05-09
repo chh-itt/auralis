@@ -34,9 +34,9 @@ Three approaches compared at different parameter-change frequencies:
 
 | Change rate | `no_cache` | `manual_cache` | `auralis_memo` | Memo cache hits |
 |-------------|-----------|---------------|----------------|-----------------|
-| 1% (typical UI) | 13.14 ms/fr | 0.12 ms/fr | **0.14 ms/fr** | 99% |
-| 10% | 12.51 ms/fr | 1.26 ms/fr | **1.57 ms/fr** | 90% |
-| 50% (pathological) | 12.54 ms/fr | 6.25 ms/fr | **8.05 ms/fr** | 50% |
+| 1% (typical UI) | 13.29 ms/fr | 0.14 ms/fr | **0.15 ms/fr** | 99% |
+| 10% | 12.94 ms/fr | 1.29 ms/fr | **1.62 ms/fr** | 90% |
+| 50% (pathological) | 12.97 ms/fr | 6.46 ms/fr | **8.29 ms/fr** | 50% |
 
 - **`no_cache`**: recompute everything every frame. Fast to write (3 lines), always correct, always slow.
 - **`manual_cache`**: version-check + cascade invalidation. ~20 lines for 3 stages. Correct and fast, but fragile when the pipeline changes.
