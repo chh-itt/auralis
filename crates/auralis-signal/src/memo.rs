@@ -410,8 +410,13 @@ fn run_compute<T: Clone + 'static>(
 
 impl<T> Drop for Memo<T> {
     fn drop(&mut self) {
-        for (_, cleanup) in self.subscriptions.borrow_mut().drain(..) {
-            cleanup();
+        // Only drain when this is the last clone — all clones share
+        // the same `subscriptions` Rc.  Draining from any intermediate
+        // clone would disconnect the remaining ones from their sources.
+        if Rc::strong_count(&self.subscriptions) == 1 {
+            for (_, cleanup) in self.subscriptions.borrow_mut().drain(..) {
+                cleanup();
+            }
         }
     }
 }
@@ -692,5 +697,27 @@ mod tests {
         // The memo must be dirty because it reads through SignalMap::with.
         assert!(memo.is_dirty());
         assert_eq!(memo.read(), 99);
+    }
+
+    #[test]
+    fn memo_clone_drop_does_not_disconnect_siblings() {
+        // Dropping one clone must not unsubscribe shared sources.
+        let sig = Signal::new(0i32);
+        let s = sig.clone();
+        let m1 = Memo::new(move || s.read() * 2);
+        let m2 = m1.clone();
+
+        assert_eq!(m1.read(), 0);
+        assert_eq!(m2.read(), 0);
+
+        // Drop m2 — m1 must remain connected.
+        drop(m2);
+
+        sig.set(10);
+        assert!(
+            m1.is_dirty(),
+            "m1 should still be subscribed after clone drop"
+        );
+        assert_eq!(m1.read(), 20);
     }
 }

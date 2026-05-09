@@ -36,6 +36,13 @@ impl Drop for BatchGuard {
                 for notification in notifications {
                     // Each notification is isolated — a panic in one
                     // won't drop the remaining queued notifications.
+                    //
+                    // With a ScheduleFlush hook installed, executor_schedule
+                    // only enqueues the notification (infallible).  The
+                    // actual subscriber callback runs later during flush
+                    // step 2, which has its own catch_unwind.  This guard
+                    // covers the no-hook fallback where callbacks execute
+                    // synchronously inside executor_schedule.
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         executor_schedule(notification);
                     }));

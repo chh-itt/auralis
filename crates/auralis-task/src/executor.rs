@@ -278,9 +278,11 @@ pub struct Executor {
     timers: BTreeMap<u64, Vec<TaskId>>,
     /// Slot index and generation in [`SLOTS`] for routing wakes back
     /// to this executor.  Set by [`new_instance`] or lazily for the
-    /// global executor; 0 means unregistered.
+    /// global executor.
     slot_id: u64,
     generation: u64,
+    /// Whether this executor has been registered in [`SLOTS`].
+    registered: bool,
 }
 
 // Set by the executor before polling a task, cleared afterward.
@@ -317,6 +319,7 @@ impl Executor {
             timers: BTreeMap::new(),
             slot_id: 0,
             generation: 0,
+            registered: false,
         }
     }
 
@@ -403,22 +406,26 @@ fn ensure_global_registered() -> (u64, u64) {
             });
         } else {
             // Verify slot 0 still holds the global executor.
-            // After reset_executor_for_test + new_instance, an
-            // instance executor may have claimed slot 0.
             let global = EXECUTOR.with(Rc::clone);
             let is_global = slots[0]
                 .weak
                 .upgrade()
                 .is_some_and(|ex| Rc::ptr_eq(&ex, &global));
             if !is_global {
-                // Displace the intruder with a higher generation
-                // so old wakers targeting (0, old_gen) are rejected.
                 slots[0] = Slot {
                     weak: Rc::downgrade(&global),
                     generation: slots[0].generation.wrapping_add(1),
                 };
             }
         }
+        // Mark the global executor as registered so flush_instance
+        // doesn't call this function again on every flush.
+        EXECUTOR.with(|ex| {
+            let mut e = ex.borrow_mut();
+            e.slot_id = 0;
+            e.generation = slots[0].generation;
+            e.registered = true;
+        });
         let gen = slots[0].generation;
         (0, gen)
     })
@@ -440,8 +447,12 @@ impl Executor {
         let ex = Rc::new(RefCell::new(Executor::new()));
         // Register in the slot table so TaskWaker can find this executor.
         let (slot_id, generation) = register_executor(Rc::downgrade(&ex));
-        ex.borrow_mut().slot_id = slot_id;
-        ex.borrow_mut().generation = generation;
+        {
+            let mut e = ex.borrow_mut();
+            e.slot_id = slot_id;
+            e.generation = generation;
+            e.registered = true;
+        }
         ex
     }
 
@@ -654,12 +665,15 @@ impl Executor {
                 }
 
                 // Ensure the executor is registered in the slot table.
+                // Must not call ensure_global_registered while holding
+                // a borrow on ex (it borrows the global EXECUTOR).
                 let (slot_id, gen) = {
                     let e = ex.borrow();
-                    if e.slot_id == 0 && e.generation == 0 {
-                        ensure_global_registered()
-                    } else {
+                    if e.registered {
                         (e.slot_id, e.generation)
+                    } else {
+                        drop(e);
+                        ensure_global_registered()
                     }
                 };
                 let waker = Waker::from(Arc::new(TaskWaker {
@@ -679,55 +693,36 @@ impl Executor {
                 // Let futures discover their task id (used by timer::sleep).
                 CURRENT_POLLING_TASK.with(|c| c.set(Some(tid)));
 
-                // Task isolation (non-Wasm).
-                #[cfg(not(target_arch = "wasm32"))]
+                // Task isolation — prevents a panicking task from
+                // unwinding through flush and leaving in_flush set.
                 let result: Result<Poll<()>, Box<dyn std::any::Any + Send>> =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         state.future.as_mut().poll(&mut cx)
                     }));
-                #[cfg(target_arch = "wasm32")]
-                let poll = state.future.as_mut().poll(&mut cx);
 
                 CURRENT_POLLING_TASK.with(|c| c.set(None));
                 crate::scope::set_scope_direct(prev_scope);
 
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    match result {
-                        Ok(Poll::Ready(())) => {
-                            ex.borrow_mut().free_slot(tid);
-                        }
-                        Err(payload) => {
-                            // Notify the panic hook (if any) before freeing the slot.
-                            let hook = ex.borrow().panic_hook.clone();
-                            if let Some(h) = hook {
-                                h(PanicInfo {
-                                    task_id: tid,
-                                    scope_id,
-                                    payload,
-                                });
-                            }
-                            ex.borrow_mut().free_slot(tid);
-                        }
-                        Ok(Poll::Pending) => {
-                            let mut e = ex.borrow_mut();
-                            if e.tasks[tid as usize].is_none() {
-                                e.tasks[tid as usize] = Some(state);
-                            }
-                        }
+                match result {
+                    Ok(Poll::Ready(())) => {
+                        ex.borrow_mut().free_slot(tid);
                     }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    match poll {
-                        Poll::Ready(()) => {
-                            ex.borrow_mut().free_slot(tid);
+                    Err(payload) => {
+                        // Notify the panic hook (if any) before freeing the slot.
+                        let hook = ex.borrow().panic_hook.clone();
+                        if let Some(h) = hook {
+                            h(PanicInfo {
+                                task_id: tid,
+                                scope_id,
+                                payload,
+                            });
                         }
-                        Poll::Pending => {
-                            let mut e = ex.borrow_mut();
-                            if e.tasks[tid as usize].is_none() {
-                                e.tasks[tid as usize] = Some(state);
-                            }
+                        ex.borrow_mut().free_slot(tid);
+                    }
+                    Ok(Poll::Pending) => {
+                        let mut e = ex.borrow_mut();
+                        if e.tasks[tid as usize].is_none() {
+                            e.tasks[tid as usize] = Some(state);
                         }
                     }
                 }
@@ -755,6 +750,10 @@ impl Executor {
                 }
             }
         }
+
+        // Drain any wakes that were buffered while the executor RefCell
+        // was borrowed (PENDING_WAKES fallback in TaskWaker::wake).
+        drain_pending_wakes();
     }
 }
 
@@ -884,9 +883,6 @@ fn drain_pending_wakes() {
 
 fn flush() {
     EXECUTOR.with(Executor::flush_instance);
-    // Drain any wakes that landed in PENDING_WAKES because the executor
-    // RefCell was borrowed during a callback or task poll.
-    drain_pending_wakes();
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1062,8 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
             }
         }
         // Clean up timer entries (requires mutable borrow, separate pass).
+        // O(n) retain per deadline is acceptable because timer lists per
+        // deadline are tiny (typically 1-2 entries in single-threaded use).
         for (dl, tid) in &timer_deadlines {
             if let Some(tids) = ex.timers.get_mut(dl) {
                 tids.retain(|id| id != tid);
@@ -1114,13 +1112,6 @@ pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output
             .collect();
         all_free.sort_unstable();
         all_free.dedup();
-        // Cap growth: free_slots should never significantly exceed the
-        // number of active slots.  More entries than tasks + a generous
-        // buffer are pure waste from repeated create/cancel cycles.
-        let cap = ex.tasks.len().saturating_add(256);
-        if all_free.len() > cap {
-            all_free.truncate(cap);
-        }
         ex.free_slots = all_free;
 
         dropped
@@ -1242,6 +1233,7 @@ pub fn reset_executor_for_test() {
         ex.time_source = None;
         ex.slot_id = 0;
         ex.generation = 0;
+        ex.registered = false;
     });
     crate::scope::clear_scope_registry();
 }
