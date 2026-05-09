@@ -428,7 +428,8 @@ impl Executor {
             let mut e = ex.borrow_mut();
             let now = e.now_ms();
             if now > 0 {
-                let expired: Vec<u64> = e.timers.keys().copied().take_while(|&d| d <= now).collect();
+                let expired: Vec<u64> =
+                    e.timers.keys().copied().take_while(|&d| d <= now).collect();
                 for deadline in expired {
                     if let Some(tasks) = e.timers.remove(&deadline) {
                         for tid in tasks {

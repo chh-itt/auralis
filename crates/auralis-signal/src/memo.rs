@@ -246,8 +246,7 @@ impl<T: Clone + 'static> Memo<T> {
                 let mut old = self.subscriptions.borrow_mut();
                 let old_subs: Vec<(SignalKey, CleanupFn)> = std::mem::take(&mut *old);
 
-                let old_keys: HashSet<SignalKey> =
-                    old_subs.iter().map(|(k, _)| *k).collect();
+                let old_keys: HashSet<SignalKey> = old_subs.iter().map(|(k, _)| *k).collect();
 
                 let mut keep = Vec::with_capacity(old_subs.len().max(new_keys.len()));
                 for (key, cleanup) in old_subs {
@@ -260,13 +259,13 @@ impl<T: Clone + 'static> Memo<T> {
 
                 // Add genuinely new subscriptions; unsubscribe duplicates.
                 for (key, cleanup) in new_subs.borrow_mut().drain(..) {
-                    if !old_keys.contains(&key) {
-                        keep.push((key, cleanup));
-                    } else {
+                    if old_keys.contains(&key) {
                         // Same SignalKey → old subscription is already
                         // in `keep`.  Drop this duplicate to avoid
                         // accumulating subscribers on the source signal.
                         cleanup();
+                    } else {
+                        keep.push((key, cleanup));
                     }
                 }
 
