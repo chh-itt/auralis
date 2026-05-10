@@ -351,6 +351,11 @@ struct TaskScopeInner {
     #[cfg(feature = "debug")]
     debug_label: Option<String>,
     cancelled: bool,
+    /// The executor that owns tasks spawned in this scope.
+    /// Stored as `Rc` (strong reference) so the executor lives
+    /// at least as long as the scope — essential for safe
+    /// cancellation during drop.
+    executor: executor::ExecutorRef,
 }
 
 // ---------------------------------------------------------------------------
@@ -389,8 +394,19 @@ pub struct TaskScope {
 }
 
 impl TaskScope {
-    /// Create a new root scope (no parent).
+    /// Create a new root scope on the global thread-local executor.
+    ///
+    /// For explicit executor ownership use [`TaskScope::with_executor`].
     pub fn new() -> Self {
+        Self::with_executor(&executor::current_executor_instance())
+    }
+
+    /// Create a new root scope on the given executor.
+    ///
+    /// All tasks spawned in this scope (and its descendants) run on
+    /// `ex`.  The scope holds a strong reference, keeping the executor
+    /// alive at least as long as the scope.
+    pub fn with_executor(ex: &executor::ExecutorRef) -> Self {
         let inner = Rc::new(RefCell::new(TaskScopeInner {
             id: alloc_scope_id(),
             task_ids: Vec::new(),
@@ -401,6 +417,7 @@ impl TaskScope {
             #[cfg(feature = "debug")]
             debug_label: None,
             cancelled: false,
+            executor: Rc::clone(ex),
         }));
         let id = inner.borrow().id;
         let suspended = Rc::new(Cell::new(false));
@@ -408,11 +425,9 @@ impl TaskScope {
         Self { inner, suspended }
     }
 
-    /// Create a child scope attached to `self`.
-    ///
-    /// A weak back-reference to the parent is stored so that
-    /// [`consume`](TaskScope::consume) can walk up the tree.
+    /// Create a child scope that inherits the parent's executor.
     pub fn new_child(parent: &Self) -> Self {
+        let ex = parent.inner.borrow().executor.clone();
         let inner = Rc::new(RefCell::new(TaskScopeInner {
             id: alloc_scope_id(),
             task_ids: Vec::new(),
@@ -423,6 +438,7 @@ impl TaskScope {
             #[cfg(feature = "debug")]
             debug_label: None,
             cancelled: false,
+            executor: ex,
         }));
         let id = inner.borrow().id;
         let suspended = Rc::new(Cell::new(false));
@@ -447,13 +463,18 @@ impl TaskScope {
         priority: Priority,
         future: impl Future<Output = ()> + 'static,
     ) {
-        let mut inner = self.inner.borrow_mut();
+        let inner = self.inner.borrow();
         if inner.cancelled {
             return;
         }
-        let task_id =
-            with_current_scope(self, || executor::spawn_scoped(priority, inner.id, future));
-        inner.task_ids.push(task_id);
+        let ex = Rc::clone(&inner.executor);
+        let task_id = executor::with_executor(&ex, || {
+            with_current_scope(self, || {
+                executor::spawn_scoped_on(&ex, priority, inner.id, future)
+            })
+        });
+        drop(inner);
+        self.inner.borrow_mut().task_ids.push(task_id);
     }
 
     // -- callback lifecycle ------------------------------------------------
@@ -620,7 +641,8 @@ impl TaskScope {
         };
 
         // Enqueue all tasks belonging to this scope.
-        executor::enqueue_scope_tasks(scope_id);
+        let ex = Rc::clone(&self.inner.borrow().executor);
+        executor::enqueue_scope_tasks_on(&ex, scope_id);
 
         // Resume children (cascading).
         for child in &children {
@@ -707,23 +729,19 @@ impl Drop for TaskScope {
             scope.callbacks.borrow_mut().clear();
 
             if !scope.task_ids.is_empty() {
+                let ex = Rc::clone(&scope.executor);
                 let dropped_futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
-                    executor::cancel_scope_tasks(scope.id);
+                    executor::cancel_scope_tasks_on(&ex, scope.id);
                 drop(dropped_futures);
             }
-            // Clear context to release Rc references.
             scope.context.borrow_mut().clear();
-
-            // Remove from the global registry.  This scope's Drop will run
-            // later (when the parent's children Vec is cleared) but will
-            // see cancelled=true and return immediately, so we must
-            // unregister now.
             unregister_scope(scope.id);
         }
 
         // ---- cancel own tasks -------------------------------------------
         if !inner.task_ids.is_empty() {
-            let dropped_futures = executor::cancel_scope_tasks(inner.id);
+            let ex = Rc::clone(&inner.executor);
+            let dropped_futures = executor::cancel_scope_tasks_on(&ex, inner.id);
             drop(dropped_futures);
         }
 

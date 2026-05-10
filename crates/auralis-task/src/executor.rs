@@ -792,7 +792,7 @@ impl Executor {
 // Current-executor storage — injectable, defaults to thread-local
 // ---------------------------------------------------------------------------
 
-type ExecutorRef = Rc<RefCell<Executor>>;
+pub(crate) type ExecutorRef = Rc<RefCell<Executor>>;
 
 /// RAII guard that restores the previous executor when dropped.
 struct RestoreExecutor(Option<ExecutorRef>);
@@ -1012,137 +1012,137 @@ pub fn spawn_global(future: impl Future<Output = ()> + 'static) {
 
 /// Spawn a future on the global executor at the given priority.
 pub fn spawn_global_with_priority(priority: Priority, future: impl Future<Output = ()> + 'static) {
-    spawn_inner(Box::pin(future), priority, 0);
+    spawn_inner_on(&EXECUTOR.with(Rc::clone), Box::pin(future), priority, 0);
 }
 
-pub(crate) fn spawn_scoped(
+/// Spawn a future on a specific executor and scope.
+pub(crate) fn spawn_scoped_on(
+    ex: &Rc<RefCell<Executor>>,
     priority: Priority,
     scope_id: u64,
     future: impl Future<Output = ()> + 'static,
 ) -> TaskId {
-    spawn_inner(Box::pin(future), priority, scope_id)
+    spawn_inner_on(ex, Box::pin(future), priority, scope_id)
 }
 
-fn spawn_inner(
+fn spawn_inner_on(
+    ex: &Rc<RefCell<Executor>>,
     future: Pin<Box<dyn Future<Output = ()> + 'static>>,
     priority: Priority,
     scope_id: u64,
 ) -> TaskId {
-    EXECUTOR.with(|exec| {
-        let (task_id, maybe_sched) = {
-            let mut ex = exec.borrow_mut();
-            let task_id = ex.allocate_id();
-            ex.tasks[task_id as usize] = Some(TaskState {
-                future,
-                priority,
-                scope_id,
-                timer_deadline: 0,
-            });
-            ex.enqueue(task_id);
-            let sched = ex.try_schedule_flush();
-            (task_id, sched)
-        };
-        // Schedule outside the borrow.
-        if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
-        }
-        task_id
-    })
+    let (task_id, maybe_sched) = {
+        let mut e = ex.borrow_mut();
+        let task_id = e.allocate_id();
+        e.tasks[task_id as usize] = Some(TaskState {
+            future,
+            priority,
+            scope_id,
+            timer_deadline: 0,
+        });
+        e.enqueue(task_id);
+        let sched = e.try_schedule_flush();
+        (task_id, sched)
+    };
+    if let Some(sched) = maybe_sched {
+        let ex2 = Rc::clone(ex);
+        sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
+    }
+    task_id
 }
 
-/// Enqueue all tasks belonging to `scope_id` and trigger a flush.
+/// Enqueue all tasks belonging to `scope_id` on a given executor.
 ///
 /// Used by [`TaskScope::resume`] to restart tasks after a suspend.
-pub(crate) fn enqueue_scope_tasks(scope_id: u64) {
-    EXECUTOR.with(|exec| {
-        let task_ids: Vec<TaskId> = {
-            let ex = exec.borrow();
-            ex.tasks
-                .iter()
-                .enumerate()
-                .filter(|(_, slot)| slot.as_ref().is_some_and(|t| t.scope_id == scope_id))
-                .map(|(idx, _)| idx as TaskId)
-                .collect()
-        };
-        let maybe_sched = {
-            let mut ex = exec.borrow_mut();
-            for tid in task_ids {
-                ex.enqueue(tid);
-            }
-            if ex.in_flush {
-                None
-            } else {
-                ex.try_schedule_flush()
-            }
-        };
-        if let Some(sched) = maybe_sched {
-            sched.schedule(Box::new(flush));
-        }
-    });
-}
-
-pub(crate) fn cancel_scope_tasks(scope_id: u64) -> Vec<Pin<Box<dyn Future<Output = ()>>>> {
-    EXECUTOR.with(|exec| {
-        let mut ex = exec.borrow_mut();
-        let mut dropped = Vec::new();
-
-        // Collect timer deadlines for scope tasks before mutating timers.
-        let mut timer_deadlines: Vec<(u64, TaskId)> = Vec::new();
-        for (tid, slot) in ex.tasks.iter().enumerate() {
-            if let Some(ref t) = slot {
-                if t.scope_id == scope_id && t.timer_deadline != 0 {
-                    timer_deadlines.push((t.timer_deadline, tid as TaskId));
-                }
-            }
-        }
-        // Clean up timer entries.
-        for (dl, tid) in &timer_deadlines {
-            ex.cleanup_timer(*tid, *dl);
-        }
-
-        for slot in &mut ex.tasks {
-            if let Some(ref t) = slot {
-                if t.scope_id == scope_id {
-                    if let Some(state) = slot.take() {
-                        dropped.push(state.future);
-                    }
-                }
-            }
-        }
-
-        // Filter queues.
-        let high: Vec<TaskId> = ex
-            .high_queue
-            .iter()
-            .filter(|id| ex.tasks[**id as usize].is_some())
-            .copied()
-            .collect();
-        ex.high_queue.clear();
-        ex.high_queue.extend(high);
-
-        let low: Vec<TaskId> = ex
-            .low_queue
-            .iter()
-            .filter(|id| ex.tasks[**id as usize].is_some())
-            .copied()
-            .collect();
-        ex.low_queue.clear();
-        ex.low_queue.extend(low);
-
-        let mut all_free: Vec<TaskId> = ex
-            .tasks
+pub(crate) fn enqueue_scope_tasks_on(ex: &ExecutorRef, scope_id: u64) {
+    let task_ids: Vec<TaskId> = {
+        let e = ex.borrow();
+        e.tasks
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_none())
-            .map(|(i, _)| i as TaskId)
-            .chain(ex.free_slots.iter().copied())
-            .collect();
-        all_free.sort_unstable();
-        all_free.dedup();
-        ex.free_slots = all_free;
+            .filter(|(_, slot)| slot.as_ref().is_some_and(|t| t.scope_id == scope_id))
+            .map(|(idx, _)| idx as TaskId)
+            .collect()
+    };
+    let maybe_sched = {
+        let mut e = ex.borrow_mut();
+        for tid in &task_ids {
+            e.enqueue(*tid);
+        }
+        if e.in_flush {
+            None
+        } else {
+            e.try_schedule_flush()
+        }
+    };
+    if let Some(sched) = maybe_sched {
+        let ex2 = Rc::clone(ex);
+        sched.schedule(Box::new(move || Executor::flush_instance(&ex2)));
+    }
+}
+/// Cancel all tasks belonging to `scope_id` on a specific executor.
+pub(crate) fn cancel_scope_tasks_on(
+    ex: &Rc<RefCell<Executor>>,
+    scope_id: u64,
+) -> Vec<Pin<Box<dyn Future<Output = ()>>>> {
+    let mut e = ex.borrow_mut();
+    let mut dropped = Vec::new();
 
-        dropped
-    })
+    // Collect timer deadlines for scope tasks before mutating timers.
+    let mut timer_deadlines: Vec<(u64, TaskId)> = Vec::new();
+    for (tid, slot) in e.tasks.iter().enumerate() {
+        if let Some(ref t) = slot {
+            if t.scope_id == scope_id && t.timer_deadline != 0 {
+                timer_deadlines.push((t.timer_deadline, tid as TaskId));
+            }
+        }
+    }
+    for (dl, tid) in &timer_deadlines {
+        e.cleanup_timer(*tid, *dl);
+    }
+
+    for slot in &mut e.tasks {
+        if let Some(ref t) = slot {
+            if t.scope_id == scope_id {
+                if let Some(state) = slot.take() {
+                    dropped.push(state.future);
+                }
+            }
+        }
+    }
+
+    // Filter queues.
+    let high: Vec<TaskId> = e
+        .high_queue
+        .iter()
+        .filter(|id| e.tasks[**id as usize].is_some())
+        .copied()
+        .collect();
+    e.high_queue.clear();
+    e.high_queue.extend(high);
+
+    let low: Vec<TaskId> = e
+        .low_queue
+        .iter()
+        .filter(|id| e.tasks[**id as usize].is_some())
+        .copied()
+        .collect();
+    e.low_queue.clear();
+    e.low_queue.extend(low);
+
+    let mut all_free: Vec<TaskId> = e
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_none())
+        .map(|(i, _)| i as TaskId)
+        .chain(e.free_slots.iter().copied())
+        .collect();
+    all_free.sort_unstable();
+    all_free.dedup();
+    e.free_slots = all_free;
+
+    dropped
 }
 
 // ---------------------------------------------------------------------------
