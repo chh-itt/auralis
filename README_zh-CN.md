@@ -112,6 +112,8 @@ demos/
   egui-demo/            # Auralis vs 纯 egui 对比演示
     examples/
       perf_report.rs    # 无头性能基准
+  wasm-counter/         # Wasm 反应式计数器 (Signal + Memo + timer)
+  cli-multitask/        # CLI 多任务 Ctrl+C 取消演示
 docs/
   vision-and-design.md  # 设计理念（英文）
   architecture.md       # 架构与模块（英文）

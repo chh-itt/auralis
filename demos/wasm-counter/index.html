@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Auralis Wasm Counter</title>
+    <style>
+        body { font-family: monospace; max-width: 480px; margin: 2rem auto; }
+        button { font-size: 1.2rem; padding: 0.3rem 1rem; margin: 0 0.3rem; cursor: pointer; }
+        .value { font-size: 2rem; font-weight: bold; }
+        .memo { color: #555; margin-left: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Auralis Wasm Counter</h1>
+    <p>Signal + Memo + timer::sleep in the browser.</p>
+
+    <p>
+        Count: <span id="count" class="value">0</span>
+        <span id="doubled" class="memo"></span>
+    </p>
+    <button id="inc">+1</button>
+    <button id="dec">-1</button>
+    <button id="auto">Auto +1/s</button>
+    <button id="stop">Stop</button>
+
+    <p><small>Zero unsafe, zero dependencies (signal crate). <a href="https://github.com/chh-itt/auralis">auralis on GitHub</a></small></p>
+
+    <script type="module">
+        import init from './pkg/auralis_wasm_counter.js';
+        init();
+    </script>
+</body>
+</html>

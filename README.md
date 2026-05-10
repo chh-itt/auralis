@@ -114,6 +114,8 @@ demos/
   egui-demo/            # Auralis vs plain egui comparison
     examples/
       perf_report.rs    # Headless performance benchmark
+  wasm-counter/         # Wasm reactive counter (Signal + Memo + timer)
+  cli-multitask/        # CLI multi-task with Ctrl+C cancellation
 docs/
   vision-and-design.md  # Design philosophy (EN)
   architecture.md       # Architecture & modules (EN)

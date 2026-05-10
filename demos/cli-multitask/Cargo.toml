@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "auralis-cli-multitask"
+version = "0.1.0"
+edition = "2021"
+description = "CLI multi-task demo — TaskScope BFS cancellation on Ctrl+C"
+
+[dependencies]
+auralis-signal = { path = "../../crates/auralis-signal" }
+auralis-task = { path = "../../crates/auralis-task" }
+ctrlc = "3.4"
