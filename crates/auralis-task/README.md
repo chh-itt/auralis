@@ -12,7 +12,7 @@ Built on `auralis-signal`. `#![forbid(unsafe_code)]`. Single-threaded by design.
 
 | Type | Role |
 |------|------|
-| `TaskScope` | Owns spawned tasks; dropping cancels everything inside (BFS leaf-to-root, no stack overflow) |
+| `TaskScope` | Owns spawned tasks on an executor; `with_executor(&ex)` for explicit ownership, `new()` for global |
 | `Executor` | Single-threaded async executor with high/low priority queues |
 | `Priority` | `High` or `Low` — high dequeued first each flush cycle |
 | `CallbackHandle` | RAII guard for signal subscriptions (dropped before tasks on scope cancel) |
@@ -55,7 +55,8 @@ drop(scope); // cancels all spawned tasks
 - **Iterative scope cancellation** — BFS collect + leaf-to-root cancel, 200+ nesting levels without stack overflow
 - **Configurable time budget** — `set_global_time_budget(ms)`, default 8 ms; set to `u64::MAX` to disable
 - **Panic hook** — `set_panic_hook(hook)` to observe task failures with task_id and scope_id
-- **Instance isolation** — `Executor::new_instance()` + `with_executor()` for multi-threaded SSR; slot-based waker routing with generation counters
+- **Explicit executor ownership** — `TaskScope::with_executor(&ex)` stores an `Rc` strong reference; spawn, cancel, and resume all route through the scope's executor without thread-local lookup. `TaskScope::new()` delegates to the global executor as a convenience.
+- **Instance isolation** — `Executor::new_instance()` for multi-threaded SSR; slot-based waker routing with generation counters
 - **Cooperative timer** — `timer::sleep(dur)` works with any `TimeSource` implementation
 - **Panic-safe callbacks** — each deferred signal callback is `catch_unwind`-isolated in the executor flush
 

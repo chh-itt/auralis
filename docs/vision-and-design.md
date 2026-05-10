@@ -81,9 +81,9 @@ Auralis's escape hatch is **instance isolation**, not shared mutable state:
 ```rust
 // Independent Executor per thread / per request
 let ex = Executor::new_instance();
-auralis_task::with_executor(&ex, || {
-    // Signals and tasks here are routed to `ex`, fully isolated.
-});
+let scope = TaskScope::with_executor(&ex); // explicit ownership
+scope.spawn(async { /* ... */ });
+// scope holds a strong reference to ex; drop cancels on ex
 ```
 
 This mirrors tokio's single-threaded runtime + multi-instance model, or

@@ -152,15 +152,20 @@ call `init_flush_scheduler` once at startup and never use `with_executor`.
 
 ### TaskScope Tree
 
+Each scope holds an `Rc<RefCell<Executor>>` strong reference, so the executor
+lives at least as long as the scope — essential for safe cancellation during drop.
+
 ```
-TaskScope::new()
-├─ scope_1.spawn(future_a)       # future_a belongs to scope_1
+TaskScope::with_executor(&ex)    # explicit executor, primary API
+TaskScope::new()                 # convenience: delegates to global executor
+├─ scope_1.spawn(future_a)       # routes through scope_1's executor
 ├─ child = TaskScope::new_child(&scope_1)
-│   └─ child.spawn(future_b)     # future_b belongs to child
+│   └─ inherits parent's executor
 └─ drop(scope_1)
     ├─ CallbackHandle dropped first (disconnect signal chains)
     ├─ BFS collect scope_1 + child
-    └─ Leaf-to-root cancel all tasks
+    ├─ Each scope's cancel_scope_tasks_on(&scope.executor, id)
+    └─ Leaf-to-root cancel all tasks on the correct executor
 ```
 
 ### Scope Suspend / Resume
