@@ -7,12 +7,6 @@ use auralis_task::{timer, Executor, TaskScope, TimeSource};
 use wasm_bindgen::prelude::*;
 use web_sys::window;
 
-// ---- DOM helpers ----
-
-fn log(s: &str) {
-    web_sys::console::log_1(&JsValue::from_str(s));
-}
-
 fn set_text(id: &str, text: &str) {
     if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id(id)) {
         el.set_text_content(Some(text));
@@ -29,13 +23,10 @@ fn button(id: &str, f: impl FnMut() + 'static) {
     closure.forget();
 }
 
-// ---- entry ----
-
 #[wasm_bindgen(start)]
 pub fn main() {
     let count = Signal::new(0i32);
 
-    // ---- executor + TimeSource ----
     let ex = Executor::new_instance();
 
     struct WasmClock;
@@ -49,16 +40,14 @@ pub fn main() {
     }
     Executor::install_time_source(&ex, std::rc::Rc::new(WasmClock));
 
-    // On Wasm, main() returns after setup.  If the scope is dropped
-    // at that point, `cancelled` is set to true and subsequent spawns
-    // silently return.  Move the only reference into the button
-    // closure (which is forget'd via the event listener) so it lives
-    // as long as the page.
+    // Moved into the button closure (forget'd via event listener)
+    // so it outlives main().  TaskScope::drop only cancels when
+    // strong_count==1, so temporary clones from find_scope /
+    // with_current_scope are harmless.
     let scope_auto = TaskScope::with_executor(&ex);
-
     let auto_running = Rc::new(Cell::new(false));
 
-    // ---- display loop (setInterval ~60fps) ----
+    // Display loop (~60fps).
     let cnt_display = count.clone();
     let ex_display = ex.clone();
     let closure = Closure::wrap(Box::new(move || {
@@ -78,7 +67,7 @@ pub fn main() {
         .unwrap();
     closure.forget();
 
-    // ---- buttons ----
+    // Buttons.
     let c = count.clone();
     button("inc", move || c.set(c.read() + 1));
 
@@ -89,33 +78,21 @@ pub fn main() {
     let running = Rc::clone(&auto_running);
     let ex_auto = ex.clone();
     button("auto", move || {
-        let tasks_before = ex_auto.borrow().active_task_count();
-        log(&format!("[auto] running={} tasks_before={}", running.get(), tasks_before));
         if !running.get() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
-            // Check if scope is cancelled before spawn.
-            let cancelled = scope_auto.is_cancelled();
-            log(&format!("[auto] before_spawn cancelled={}", cancelled));
             scope_auto.spawn(async move {
-                log("[auto] task started");
                 while r2.get() {
                     timer::sleep(Duration::from_secs(1)).await;
                     c2.set(c2.read() + 1);
                 }
-                log("[auto] task exited");
             });
             Executor::flush_instance(&ex_auto);
-            let tasks_after = ex_auto.borrow().active_task_count();
-            log(&format!("[auto] spawn+flush done tasks_after={}", tasks_after));
         }
     });
 
-    button("stop", move || {
-        log("[stop] clicked");
-        auto_running.set(false);
-    });
+    button("stop", move || auto_running.set(false));
 
     set_text("count", "0");
     set_text("doubled", "(doubled: 0)");
