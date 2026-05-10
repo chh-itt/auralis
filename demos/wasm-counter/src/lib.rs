@@ -45,7 +45,13 @@ pub fn main() {
     }
     Executor::install_time_source(&ex, std::rc::Rc::new(WasmClock));
 
-    let scope = TaskScope::with_executor(&ex);
+    // On Wasm, main() returns after setup.  If the scope is dropped
+    // at that point, `cancelled` is set to true and subsequent spawns
+    // silently return.  Move the only reference into the button
+    // closure (which is forget'd via the event listener) so it lives
+    // as long as the page.
+    let scope_auto = TaskScope::with_executor(&ex);
+
     let auto_running = Rc::new(Cell::new(false));
 
     // ---- display loop (setInterval ~60fps) ----
@@ -78,7 +84,6 @@ pub fn main() {
     let c = count.clone();
     let running = Rc::clone(&auto_running);
     let ex_auto = ex.clone();
-    let scope_auto = scope.clone();
     button("auto", move || {
         if !running.get() {
             running.set(true);
