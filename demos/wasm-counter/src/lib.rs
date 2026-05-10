@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use auralis_signal::Signal;
-use auralis_task::{timer, Executor, TaskScope};
+use auralis_task::{timer, Executor, TaskScope, TimeSource};
 use wasm_bindgen::prelude::*;
 use web_sys::window;
 
@@ -32,8 +32,22 @@ pub fn main() {
     // ---- reactive state ----
     let count = Signal::new(0i32);
 
-    // ---- executor ----
+    // ---- executor + TimeSource (performance.now) ----
     let ex = Executor::new_instance();
+
+    // Without a TimeSource, timer::sleep degrades to single-flush yield.
+    // Use performance.now() for real millisecond-precision timing in Wasm.
+    struct WasmClock;
+    impl TimeSource for WasmClock {
+        fn now_ms(&self) -> u64 {
+            window()
+                .and_then(|w| w.performance())
+                .map(|p| p.now() as u64)
+                .unwrap_or(0)
+        }
+    }
+    Executor::install_time_source(&ex, std::rc::Rc::new(WasmClock));
+
     let scope = TaskScope::with_executor(&ex);
     let auto_running = Rc::new(Cell::new(false));
 
