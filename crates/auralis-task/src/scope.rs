@@ -551,6 +551,14 @@ impl TaskScope {
             .unwrap_or_else(|| panic!("context not found: {}", std::any::type_name::<T>()))
     }
 
+    /// Return `true` if this scope has been cancelled (dropped).
+    ///
+    /// A cancelled scope silently ignores [`spawn`](TaskScope::spawn) calls.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.borrow().cancelled
+    }
+
     // -- debugging ----------------------------------------------------------
 
     /// Set a label for this scope, shown in [`dump_task_tree`] output.

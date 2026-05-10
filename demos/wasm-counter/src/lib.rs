@@ -95,6 +95,9 @@ pub fn main() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
+            // Check if scope is cancelled before spawn.
+            let cancelled = scope_auto.is_cancelled();
+            log(&format!("[auto] before_spawn cancelled={}", cancelled));
             scope_auto.spawn(async move {
                 log("[auto] task started");
                 while r2.get() {
