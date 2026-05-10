@@ -15,10 +15,6 @@ fn set_text(id: &str, text: &str) {
     }
 }
 
-fn log(s: &str) {
-    web_sys::console::log_1(&JsValue::from_str(s));
-}
-
 fn button(id: &str, f: impl FnMut() + 'static) {
     let el = window()
         .and_then(|w| w.document())
@@ -33,14 +29,11 @@ fn button(id: &str, f: impl FnMut() + 'static) {
 
 #[wasm_bindgen(start)]
 pub fn main() {
-    // ---- reactive state ----
     let count = Signal::new(0i32);
 
-    // ---- executor + TimeSource (performance.now) ----
+    // ---- executor + TimeSource ----
     let ex = Executor::new_instance();
 
-    // Without a TimeSource, timer::sleep degrades to single-flush yield.
-    // Use performance.now() for real millisecond-precision timing in Wasm.
     struct WasmClock;
     impl TimeSource for WasmClock {
         fn now_ms(&self) -> u64 {
@@ -55,9 +48,7 @@ pub fn main() {
     let scope = TaskScope::with_executor(&ex);
     let auto_running = Rc::new(Cell::new(false));
 
-    // ---- sync display to signal via timer ----
-    // In a real app you'd use requestAnimationFrame; here we use
-    // setInterval to flush the executor and update the DOM.
+    // ---- display loop (setInterval ~60fps) ----
     let cnt_display = count.clone();
     let ex_display = ex.clone();
     let closure = Closure::wrap(Box::new(move || {
@@ -71,7 +62,7 @@ pub fn main() {
         .unwrap()
         .set_interval_with_callback_and_timeout_and_arguments(
             closure.as_ref().unchecked_ref(),
-            16, // ~60fps
+            16,
             &js_sys::Array::new(),
         )
         .unwrap();
@@ -86,40 +77,28 @@ pub fn main() {
 
     let c = count.clone();
     let running = Rc::clone(&auto_running);
-    let ex_for_auto = ex.clone();
+    let ex_auto = ex.clone();
+    let scope_auto = scope.clone();
     button("auto", move || {
-        log(&format!(
-            "[auto] clicked — running={} active_tasks={}",
-            running.get(),
-            ex_for_auto.borrow().active_task_count(),
-        ));
         if !running.get() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
-            let ex_spawn = ex_for_auto.clone();
-            // Spawn directly on the executor instead of through TaskScope,
-            // to eliminate any scope registration / cancellation issues on Wasm.
-            Executor::spawn(&ex_spawn, async move {
-                log("[auto] task started");
+            scope_auto.spawn(async move {
                 while r2.get() {
                     timer::sleep(Duration::from_secs(1)).await;
                     c2.set(c2.read() + 1);
                 }
-                log("[auto] task exited (running=false)");
             });
-            // Flush immediately so the task gets polled.
-            Executor::flush_instance(&ex_for_auto);
-            log("[auto] spawn+flush done");
+            // Wasm has no ScheduleFlush — manually flush so the
+            // newly-spawned task is polled without waiting for the
+            // next setInterval tick.
+            Executor::flush_instance(&ex_auto);
         }
     });
 
-    button("stop", move || {
-        log("[stop] clicked");
-        auto_running.set(false);
-    });
+    button("stop", move || auto_running.set(false));
 
-    // ---- init ----
     set_text("count", "0");
     set_text("doubled", "(doubled: 0)");
 }
