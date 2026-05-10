@@ -86,20 +86,21 @@ pub fn main() {
 
     let c = count.clone();
     let running = Rc::clone(&auto_running);
-    let scope2 = scope.clone();
-    let ex2 = ex.clone();
+    let ex_for_auto = ex.clone();
     button("auto", move || {
         log(&format!(
             "[auto] clicked — running={} active_tasks={}",
             running.get(),
-            ex2.borrow().active_task_count(),
+            ex_for_auto.borrow().active_task_count(),
         ));
         if !running.get() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
-            let sp = scope2.clone();
-            sp.spawn(async move {
+            let ex_spawn = ex_for_auto.clone();
+            // Spawn directly on the executor instead of through TaskScope,
+            // to eliminate any scope registration / cancellation issues on Wasm.
+            Executor::spawn(&ex_spawn, async move {
                 log("[auto] task started");
                 while r2.get() {
                     timer::sleep(Duration::from_secs(1)).await;
@@ -107,7 +108,9 @@ pub fn main() {
                 }
                 log("[auto] task exited (running=false)");
             });
-            log("[auto] spawn called");
+            // Flush immediately so the task gets polled.
+            Executor::flush_instance(&ex_for_auto);
+            log("[auto] spawn+flush done");
         }
     });
 
