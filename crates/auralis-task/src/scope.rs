@@ -685,6 +685,14 @@ impl Clone for TaskScope {
 // subscriptions are removed before any task is cancelled.
 impl Drop for TaskScope {
     fn drop(&mut self) {
+        // Only cancel when this is the last reference to the inner.
+        // Temporary clones (from find_scope during executor flush,
+        // from with_current_scope during spawn) share the same inner
+        // and must not cancel the scope when they go out of scope.
+        if Rc::strong_count(&self.inner) > 1 {
+            return;
+        }
+
         let Ok(mut inner) = self.inner.try_borrow_mut() else {
             // Already borrowed — this is a re-entrant drop (e.g. a
             // callback held the last clone of this scope).  If this
