@@ -15,6 +15,10 @@ fn set_text(id: &str, text: &str) {
     }
 }
 
+fn log(s: &str) {
+    web_sys::console::log_1(&JsValue::from_str(s));
+}
+
 fn button(id: &str, f: impl FnMut() + 'static) {
     let el = window()
         .and_then(|w| w.document())
@@ -82,21 +86,35 @@ pub fn main() {
 
     let c = count.clone();
     let running = Rc::clone(&auto_running);
+    let scope2 = scope.clone();
+    let ex2 = ex.clone();
     button("auto", move || {
+        log(&format!(
+            "[auto] clicked — running={} active_tasks={}",
+            running.get(),
+            ex2.borrow().active_task_count(),
+        ));
         if !running.get() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
-            scope.spawn(async move {
+            let sp = scope2.clone();
+            sp.spawn(async move {
+                log("[auto] task started");
                 while r2.get() {
                     timer::sleep(Duration::from_secs(1)).await;
                     c2.set(c2.read() + 1);
                 }
+                log("[auto] task exited (running=false)");
             });
+            log("[auto] spawn called");
         }
     });
 
-    button("stop", move || auto_running.set(false));
+    button("stop", move || {
+        log("[stop] clicked");
+        auto_running.set(false);
+    });
 
     // ---- init ----
     set_text("count", "0");
