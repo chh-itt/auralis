@@ -9,6 +9,10 @@ use web_sys::window;
 
 // ---- DOM helpers ----
 
+fn log(s: &str) {
+    web_sys::console::log_1(&JsValue::from_str(s));
+}
+
 fn set_text(id: &str, text: &str) {
     if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id(id)) {
         el.set_text_content(Some(text));
@@ -85,24 +89,30 @@ pub fn main() {
     let running = Rc::clone(&auto_running);
     let ex_auto = ex.clone();
     button("auto", move || {
+        let tasks_before = ex_auto.borrow().active_task_count();
+        log(&format!("[auto] running={} tasks_before={}", running.get(), tasks_before));
         if !running.get() {
             running.set(true);
             let c2 = c.clone();
             let r2 = Rc::clone(&running);
             scope_auto.spawn(async move {
+                log("[auto] task started");
                 while r2.get() {
                     timer::sleep(Duration::from_secs(1)).await;
                     c2.set(c2.read() + 1);
                 }
+                log("[auto] task exited");
             });
-            // Wasm has no ScheduleFlush — manually flush so the
-            // newly-spawned task is polled without waiting for the
-            // next setInterval tick.
             Executor::flush_instance(&ex_auto);
+            let tasks_after = ex_auto.borrow().active_task_count();
+            log(&format!("[auto] spawn+flush done tasks_after={}", tasks_after));
         }
     });
 
-    button("stop", move || auto_running.set(false));
+    button("stop", move || {
+        log("[stop] clicked");
+        auto_running.set(false);
+    });
 
     set_text("count", "0");
     set_text("doubled", "(doubled: 0)");
