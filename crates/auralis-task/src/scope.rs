@@ -379,25 +379,35 @@ struct TaskScopeInner {
 /// Dropping the handle does **not** cancel the task — call [`cancel`](JoinHandle::cancel)
 /// explicitly, or drop the owning [`TaskScope`] to cancel all tasks at once.
 pub struct JoinHandle {
-    task_id: TaskId,
+    task_id: Option<TaskId>,
     executor: executor::ExecutorRef,
 }
 
 impl JoinHandle {
     /// Cancel this specific task.
     ///
-    /// No-op if the task has already completed or been cancelled.
+    /// No-op if the task has already completed or was spawned into an
+    /// already-cancelled scope.
     pub fn cancel(&self) {
-        executor::cancel_task(&self.executor, self.task_id);
+        if let Some(tid) = self.task_id {
+            executor::cancel_task(&self.executor, tid);
+        }
     }
 
     /// Return `true` if the task has completed (normally or via cancellation).
+    ///
+    /// Returns `true` for handles created by spawning into an already-cancelled
+    /// scope (they never had a real task).
     pub fn is_finished(&self) -> bool {
-        executor::is_task_finished(&self.executor, self.task_id)
+        match self.task_id {
+            Some(tid) => executor::is_task_finished(&self.executor, tid),
+            None => true,
+        }
     }
 
-    /// Return the id of the wrapped task (useful for debugging).
-    pub fn task_id(&self) -> TaskId {
+    /// Return the id of the wrapped task, or `None` if the handle was
+    /// created by spawning into an already-cancelled scope.
+    pub fn task_id(&self) -> Option<TaskId> {
         self.task_id
     }
 }
@@ -538,7 +548,7 @@ impl TaskScope {
         let inner = self.inner.borrow();
         if inner.cancelled.get() {
             return JoinHandle {
-                task_id: 0,
+                task_id: None,
                 executor: Rc::clone(&inner.executor),
             };
         }
@@ -551,7 +561,7 @@ impl TaskScope {
         drop(inner);
         self.inner.borrow_mut().task_ids.push(task_id);
         JoinHandle {
-            task_id,
+            task_id: Some(task_id),
             executor: ex,
         }
     }

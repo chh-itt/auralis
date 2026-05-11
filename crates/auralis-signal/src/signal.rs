@@ -371,8 +371,10 @@ impl<T> Signal<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `f` panics — the signal is left in a consistent state
-    /// but the version has already been bumped.
+    /// If `f` panics the version is **not** bumped (version bump happens
+    /// after `f` returns).  The stored value may be in a partially
+    /// mutated state; the signal remains consistent (no broken invariants)
+    /// but callers should avoid panicking closures.
     pub fn update(&self, f: impl FnOnce(&mut T))
     where
         T: 'static,

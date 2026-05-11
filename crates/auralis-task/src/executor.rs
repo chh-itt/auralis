@@ -1103,14 +1103,19 @@ pub(crate) fn cancel_scope_tasks_on(
     }
 
     // Cancel each task by id (direct lookup, no full-table scan).
+    // Cancel each task by id (direct lookup, no full-table scan).
+    // Only push to free_slots for slots we actually took.
     for &tid in task_ids {
         let idx = tid as usize;
         if idx < e.tasks.len() {
             if let Some(state) = e.tasks[idx].take() {
                 dropped.push(state.future);
+                e.free_slots.push(tid);
             }
         }
     }
+    e.free_slots.sort_unstable();
+    e.free_slots.dedup();
 
     // Filter queues to remove cancelled tasks.
     let high: Vec<TaskId> = e
@@ -1136,11 +1141,6 @@ pub(crate) fn cancel_scope_tasks_on(
         .collect();
     e.low_queue.clear();
     e.low_queue.extend(low);
-
-    // Update free slots.
-    e.free_slots.extend(task_ids.iter().copied());
-    e.free_slots.sort_unstable();
-    e.free_slots.dedup();
 
     dropped
 }
