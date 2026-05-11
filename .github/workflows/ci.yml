@@ -48,6 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.80
-      # --lib skips integration tests and benches; criterion is
-      # feature-gated (benchmarks) so dev-deps are not resolved.
-      - run: cargo test --workspace --lib
+      # Only auralis-signal: zero dependencies, always builds on 1.80.
+      # auralis-task's criterion dep (even when feature-disabled)
+      # transitively pulls clap -> clap_lex (edition 2024), which
+      # Cargo 1.80 cannot parse.  auralis-task is fully tested on
+      # the stable job above.
+      - run: cargo test -p auralis-signal
