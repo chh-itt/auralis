@@ -10,11 +10,4 @@ repository.workspace = true
 [features]
 default = []
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = "0.5"
-
-[[bench]]
-name = "signal_bench"
-harness = false
-
 [dependencies]

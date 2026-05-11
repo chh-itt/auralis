@@ -164,7 +164,7 @@ cargo test -p auralis-task
 cargo clippy --all-targets -- -D warnings
 
 # Benchmarks (host-side, non-Wasm)
-cargo bench -p auralis-signal
+cargo run --example signal_bench --release -p auralis-signal
 cargo run --example scope_bench --release -p auralis-task
 
 # Example
