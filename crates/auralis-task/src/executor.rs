@@ -1054,19 +1054,13 @@ fn spawn_inner_on(
 /// Enqueue all tasks belonging to `scope_id` on a given executor.
 ///
 /// Used by [`TaskScope::resume`] to restart tasks after a suspend.
-pub(crate) fn enqueue_scope_tasks_on(ex: &ExecutorRef, scope_id: u64) {
-    let task_ids: Vec<TaskId> = {
-        let e = ex.borrow();
-        e.tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| slot.as_ref().is_some_and(|t| t.scope_id == scope_id))
-            .map(|(idx, _)| idx as TaskId)
-            .collect()
-    };
+pub(crate) fn enqueue_scope_tasks_on(ex: &ExecutorRef, task_ids: &[TaskId]) {
+    if task_ids.is_empty() {
+        return;
+    }
     let maybe_sched = {
         let mut e = ex.borrow_mut();
-        for tid in &task_ids {
+        for tid in task_ids {
             e.enqueue(*tid);
         }
         if e.in_flush {
@@ -1083,17 +1077,24 @@ pub(crate) fn enqueue_scope_tasks_on(ex: &ExecutorRef, scope_id: u64) {
 /// Cancel all tasks belonging to `scope_id` on a specific executor.
 pub(crate) fn cancel_scope_tasks_on(
     ex: &Rc<RefCell<Executor>>,
-    scope_id: u64,
+    task_ids: &[TaskId],
 ) -> Vec<Pin<Box<dyn Future<Output = ()>>>> {
-    let mut e = ex.borrow_mut();
-    let mut dropped = Vec::new();
+    if task_ids.is_empty() {
+        return Vec::new();
+    }
 
-    // Collect timer deadlines for scope tasks before mutating timers.
+    let mut e = ex.borrow_mut();
+    let mut dropped = Vec::with_capacity(task_ids.len());
+
+    // Collect timer deadlines before mutating.
     let mut timer_deadlines: Vec<(u64, TaskId)> = Vec::new();
-    for (tid, slot) in e.tasks.iter().enumerate() {
-        if let Some(ref t) = slot {
-            if t.scope_id == scope_id && t.timer_deadline != 0 {
-                timer_deadlines.push((t.timer_deadline, tid as TaskId));
+    for &tid in task_ids {
+        let idx = tid as usize;
+        if idx < e.tasks.len() {
+            if let Some(ref t) = e.tasks[idx] {
+                if t.timer_deadline != 0 {
+                    timer_deadlines.push((t.timer_deadline, tid));
+                }
             }
         }
     }
@@ -1101,22 +1102,25 @@ pub(crate) fn cancel_scope_tasks_on(
         e.cleanup_timer(*tid, *dl);
     }
 
-    for slot in &mut e.tasks {
-        if let Some(ref t) = slot {
-            if t.scope_id == scope_id {
-                if let Some(state) = slot.take() {
-                    dropped.push(state.future);
-                }
+    // Cancel each task by id (direct lookup, no full-table scan).
+    for &tid in task_ids {
+        let idx = tid as usize;
+        if idx < e.tasks.len() {
+            if let Some(state) = e.tasks[idx].take() {
+                dropped.push(state.future);
             }
         }
     }
 
-    // Filter queues.
+    // Filter queues to remove cancelled tasks.
     let high: Vec<TaskId> = e
         .high_queue
         .iter()
-        .filter(|id| e.tasks[**id as usize].is_some())
         .copied()
+        .filter(|&id| {
+            let idx = id as usize;
+            idx < e.tasks.len() && e.tasks[idx].is_some()
+        })
         .collect();
     e.high_queue.clear();
     e.high_queue.extend(high);
@@ -1124,25 +1128,48 @@ pub(crate) fn cancel_scope_tasks_on(
     let low: Vec<TaskId> = e
         .low_queue
         .iter()
-        .filter(|id| e.tasks[**id as usize].is_some())
         .copied()
+        .filter(|&id| {
+            let idx = id as usize;
+            idx < e.tasks.len() && e.tasks[idx].is_some()
+        })
         .collect();
     e.low_queue.clear();
     e.low_queue.extend(low);
 
-    let mut all_free: Vec<TaskId> = e
-        .tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.is_none())
-        .map(|(i, _)| i as TaskId)
-        .chain(e.free_slots.iter().copied())
-        .collect();
-    all_free.sort_unstable();
-    all_free.dedup();
-    e.free_slots = all_free;
+    // Update free slots.
+    e.free_slots.extend(task_ids.iter().copied());
+    e.free_slots.sort_unstable();
+    e.free_slots.dedup();
 
     dropped
+}
+
+/// Cancel a single task by its id, dropping its future and cleaning up
+/// its timer if any.  No-op if the task has already completed.
+pub(crate) fn cancel_task(ex: &Rc<RefCell<Executor>>, task_id: TaskId) {
+    let mut e = ex.borrow_mut();
+    let idx = task_id as usize;
+    if idx >= e.tasks.len() {
+        return;
+    }
+    let deadline = e.tasks[idx].as_ref().map_or(0, |t| t.timer_deadline);
+    if deadline != 0 {
+        e.cleanup_timer(task_id, deadline);
+    }
+    let slot = e.tasks[idx].take();
+    if slot.is_some() {
+        e.free_slots.push(task_id);
+        e.high_queue.retain(|&id| id != task_id);
+        e.low_queue.retain(|&id| id != task_id);
+    }
+}
+
+/// Check whether a task slot is empty (task completed or was cancelled).
+pub(crate) fn is_task_finished(ex: &Rc<RefCell<Executor>>, task_id: TaskId) -> bool {
+    let e = ex.borrow();
+    let idx = task_id as usize;
+    idx >= e.tasks.len() || e.tasks[idx].is_none()
 }
 
 // ---------------------------------------------------------------------------

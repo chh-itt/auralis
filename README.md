@@ -51,16 +51,32 @@ batch(|| {
 });
 assert_eq!(x.read(), 3);
 
+// ---- Signal::update (in-place mutation, zero clone) ----
+let items = Signal::new(vec![1, 2]);
+items.update(|v| v.push(3));
+assert_eq!(items.read(), vec![1, 2, 3]);
+
+// ---- Signal::read_untracked (read without subscribing) ----
+let config = Signal::new("dark_mode");
+let _mode = config.read_untracked(); // won't trigger re-computation
+
 // ---- TaskScope (structured concurrency) ----
 let scope = TaskScope::new();
 let c = count.clone();
-scope.spawn(async move {
+let handle = scope.spawn(async move {
     loop {
         let val = c.changed().await;
         println!("count → {val}");
     }
 });
-drop(scope); // cancels all spawned tasks
+handle.cancel(); // cancel a single task, or drop scope to cancel all
+scope.on_cleanup(|| println!("scope dropped"));
+
+// ---- watch_effect (auto-tracking side effect) ----
+scope.watch_effect(|| {
+    println!("sum = {}", sum.read());
+});
+drop(scope); // cancels all spawned tasks + runs cleanup
 ```
 
 ## Why
@@ -73,8 +89,7 @@ Auralis reduces it to things Rust programmers already know:
 - **scope owns tasks** — dropping the scope cancels everything inside
 - **events / timers / fetch are futures** — compose with `select!`, `join!`
 
-No `on_cleanup` hooks, no manual cancel tokens, no "effect system."
-Just async Rust.
+No manual cancel tokens, no "effect system." Just async Rust.
 
 ## Key Properties
 
@@ -87,7 +102,12 @@ Just async Rust.
 - **Panic-safe batch** — `BatchGuard` RAII restores state on unwind
 - **Panic-safe Memo** — old subscriptions survive a panicked recompute
 - **Proactive waker deregistration** — no stale-waker accumulation
-- **Iterative scope cancellation** — BFS leaf-to-root, no stack overflow at 200+ levels
+- **Memo cycle detection** — thread-local depth guard catches circular dependencies
+- **Iterative scope cancellation** — BFS leaf-to-root, no stack overflow at 200+ levels; direct task-id lookup (no full-table scan)
+- **`Signal::update()`** — in-place mutation without cloning
+- **`JoinHandle`** from `spawn()` — cancel or check individual tasks
+- **`watch` / `watch_effect`** — auto-tracking side effects
+- **Panic-safe cleanup** — `CallbackHandle::drop` is `catch_unwind`-isolated
 
 ## Workspace Structure
 

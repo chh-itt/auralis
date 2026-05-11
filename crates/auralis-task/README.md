@@ -16,6 +16,10 @@ Built on `auralis-signal`. `#![forbid(unsafe_code)]`. Single-threaded by design.
 | `Executor` | Single-threaded async executor with high/low priority queues |
 | `Priority` | `High` or `Low` — high dequeued first each flush cycle |
 | `CallbackHandle` | RAII guard for signal subscriptions (dropped before tasks on scope cancel) |
+| `JoinHandle` | Returned by `spawn()` — cancel or check completion of a single task |
+| `TaskScope::on_cleanup(f)` | Register a cleanup closure (sugar for `CallbackHandle::new`) |
+| `TaskScope::watch(sig, f)` | Run `f` on each signal change |
+| `TaskScope::watch_effect(f)` | Auto-tracking effect — re-runs when any signal read inside `f` changes |
 | `set_deferred(sig, val)` | Safe `Signal::set` from `Drop` contexts |
 | `yield_now()` | Yield control back to the executor once |
 | `schedule_callback(f)` | Run `f` at the start of the next flush |
@@ -53,8 +57,9 @@ drop(scope); // cancels all spawned tasks
 
 ## Key Properties
 
-- **Scope lifecycle** — `TaskScope::drop` only cancels on the last reference (`Rc::strong_count == 1`), matching `Memo::drop`. Temporary clones (from `find_scope`, `with_current_scope`) are harmless
-- **Iterative scope cancellation** — BFS collect + leaf-to-root cancel, 200+ nesting levels without stack overflow
+- **Scope lifecycle** — `TaskScope::drop` only cancels on the last reference (`Rc::strong_count == 1`), matching `Memo::drop`. The `cancelled` flag is stored outside the `RefCell` so it is always settable, even during re-entrant drop.
+- **Iterative scope cancellation** — BFS collect + leaf-to-root cancel, 200+ nesting levels without stack overflow. Cancel directly looks up tasks by id (no full-table scan).
+- **Panic-safe cleanup** — `CallbackHandle::drop` is `catch_unwind`-isolated; a panicking cleanup closure does not corrupt scope teardown.
 - **Configurable time budget** — `set_global_time_budget(ms)`, default 8 ms; set to `u64::MAX` to disable
 - **Panic hook** — `set_panic_hook(hook)` to observe task failures with task_id and scope_id
 - **Explicit executor ownership** — `TaskScope::with_executor(&ex)` stores an `Rc` strong reference; spawn, cancel, and resume all route through the scope's executor without thread-local lookup. `TaskScope::new()` delegates to the global executor as a convenience.

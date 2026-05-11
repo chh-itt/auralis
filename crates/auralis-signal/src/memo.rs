@@ -29,6 +29,39 @@ use crate::observer::{ObserverState, OBSERVER};
 use crate::signal::Signal;
 
 type CleanupFn = Box<dyn FnOnce()>;
+
+thread_local! {
+    /// Tracks the depth of nested `Memo::recompute` calls on this thread.
+    /// Used to detect circular Memo dependencies (two memos reading each
+    /// other would recurse indefinitely without this guard).
+    #[allow(clippy::missing_const_for_thread_local)]
+    static RECOMPUTE_DEPTH: Cell<u32> = Cell::new(0);
+}
+
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> Self {
+        RECOMPUTE_DEPTH.with(|d| {
+            let v = d.get() + 1;
+            d.set(v);
+            if v > 256 {
+                d.set(0);
+                panic!(
+                    "circular Memo dependency detected (recompute depth > 256). \
+                     Check for memos that read each other, directly or indirectly."
+                );
+            }
+        });
+        DepthGuard
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        RECOMPUTE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
 /// Each entry pairs a [`SignalKey`] with its unsubscribe closure.
 /// The key enables incremental diff during recomputation: shared
 /// dependencies are kept, only removed/new ones are updated.
@@ -218,10 +251,14 @@ impl<T: Clone + 'static> Memo<T> {
     /// The `computing` flag suppresses `bump_version` during compute
     /// to prevent re-entrant reader wake-ups.
     fn recompute(&self) {
-        // Prevent re-entrant recompute.
+        // Prevent re-entrant recompute on the same memo.
         if self.computing.get() {
             return;
         }
+
+        // Guard against circular Memo chains via recursion depth.
+        let _depth = DepthGuard::enter();
+
         self.computing.set(true);
 
         // Collect old keys so the observer can skip already-subscribed

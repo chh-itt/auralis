@@ -50,16 +50,32 @@ batch(|| {
 });
 assert_eq!(x.read(), 3);
 
+// ---- Signal::update（原地修改，零克隆）----
+let items = Signal::new(vec![1, 2]);
+items.update(|v| v.push(3));
+assert_eq!(items.read(), vec![1, 2, 3]);
+
+// ---- Signal::read_untracked（读取但不订阅）----
+let config = Signal::new("dark_mode");
+let _mode = config.read_untracked(); // 不会触发重新计算
+
 // ---- TaskScope（结构化并发）----
 let scope = TaskScope::new();
 let c = count.clone();
-scope.spawn(async move {
+let handle = scope.spawn(async move {
     loop {
         let val = c.changed().await;
         println!("count → {val}");
     }
 });
-drop(scope); // 取消所有已 spawn 的任务
+handle.cancel(); // 取消单个任务，或 drop scope 取消全部
+scope.on_cleanup(|| println!("scope 已丢弃"));
+
+// ---- watch_effect（自动追踪副作用）----
+scope.watch_effect(|| {
+    println!("sum = {}", sum.read());
+});
+drop(scope); // 取消所有已 spawn 的任务 + 运行清理
 ```
 
 ## 为什么
@@ -71,8 +87,7 @@ drop(scope); // 取消所有已 spawn 的任务
 - **`TaskScope` 拥有任务**：drop scope 即取消其中的一切
 - **事件/定时器/fetch 就是 future**：用 `select!`、`join!` 组合
 
-不需要 `on_cleanup` 钩子，不需要手动 cancel token，不需要"effect 系统"。
-纯异步 Rust。
+不需要手动 cancel token，不需要"effect 系统"。纯异步 Rust。
 
 ## 核心特性
 
@@ -85,7 +100,12 @@ drop(scope); // 取消所有已 spawn 的任务
 - **Panic 安全的 batch**——`BatchGuard` RAII 在 unwind 时恢复状态
 - **Panic 安全的 Memo**——compute panic 后旧订阅保留，下次 read 即可恢复
 - **主动 waker 注销**——防止僵尸 waker 堆积
-- **迭代式 scope 取消**——BFS 叶到根，200+ 层级不爆栈
+- **Memo 循环检测**——thread-local 深度守卫捕获循环依赖
+- **迭代式 scope 取消**——BFS 叶到根，200+ 层级不爆栈；直接按 TaskId 查找（无全表扫描）
+- **`Signal::update()`**——原地修改，无需克隆
+- **`JoinHandle`**——`spawn()` 返回可取消句柄，支持单任务取消/完成检测
+- **`watch` / `watch_effect`**——自动追踪副作用
+- **Panic 安全清理**——`CallbackHandle::drop` 由 `catch_unwind` 隔离
 
 ## 目录结构
 

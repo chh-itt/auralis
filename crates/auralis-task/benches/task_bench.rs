@@ -138,10 +138,75 @@ fn bench_priority_ordering(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// benchmark 4: scope churn — 100 scopes with 10 tasks each, batch drop
+// ---------------------------------------------------------------------------
+
+fn bench_scope_churn_100x10(c: &mut Criterion) {
+    c.bench_function("scope_churn_100x10_batch_drop", |b| {
+        init();
+        b.iter(|| {
+            let scopes: Vec<TaskScope> = (0..100)
+                .map(|_| {
+                    let s = TaskScope::new();
+                    for _ in 0..10 {
+                        s.spawn(async {});
+                    }
+                    s
+                })
+                .collect();
+            drop(scopes);
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// benchmark 5: scope suspend + resume (enqueue path)
+// ---------------------------------------------------------------------------
+
+fn bench_scope_suspend_resume_1000tasks(c: &mut Criterion) {
+    c.bench_function("scope_suspend_resume_1000_tasks", |b| {
+        init();
+        let scope = TaskScope::new();
+        for _ in 0..1000 {
+            scope.spawn(async {});
+        }
+        b.iter(|| {
+            scope.suspend();
+            scope.resume();
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// benchmark 6: wide shallow tree — 50 children per level, 3 levels deep
+// ---------------------------------------------------------------------------
+
+fn bench_wide_shallow_tree_drop(c: &mut Criterion) {
+    c.bench_function("scope_wide_tree_50x3_drop", |b| {
+        init();
+        b.iter(|| {
+            let root = TaskScope::new();
+            for _ in 0..50 {
+                let child = TaskScope::new_child(&root);
+                child.spawn(async {});
+                for _ in 0..50 {
+                    let grandchild = TaskScope::new_child(&child);
+                    grandchild.spawn(async {});
+                }
+            }
+            drop(root);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_scope_create_destroy,
     bench_deep_nesting_drop,
     bench_priority_ordering,
+    bench_scope_churn_100x10,
+    bench_scope_suspend_resume_1000tasks,
+    bench_wide_shallow_tree_drop,
 );
 criterion_main!(benches);

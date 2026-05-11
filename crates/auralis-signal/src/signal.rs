@@ -173,6 +173,33 @@ impl<T> Signal<T> {
         val
     }
 
+    /// Return a clone of the current value **without** subscribing the
+    /// active observer (e.g. a [`Memo`](crate::Memo)) to this signal.
+    ///
+    /// Use this inside a Memo compute function when reading a signal that
+    /// should NOT trigger recomputation when it changes — for example, a
+    /// configuration value that is read once during setup, or a signal
+    /// that is only conditionally relevant.
+    #[must_use]
+    pub fn read_untracked(&self) -> T
+    where
+        T: Clone + 'static,
+    {
+        self.state.borrow().value.clone()
+    }
+
+    /// Borrow the current value immutably and pass it to a closure,
+    /// **without** subscribing the active observer.
+    ///
+    /// The untracked counterpart of [`with`](Signal::with).
+    #[must_use]
+    pub fn with_untracked<U>(&self, f: impl FnOnce(&T) -> U) -> U
+    where
+        T: 'static,
+    {
+        f(&self.state.borrow().value)
+    }
+
     /// Replace the stored value, bump the version, and schedule
     /// subscriber callbacks for the next executor flush.
     ///
@@ -323,6 +350,40 @@ impl<T> Signal<T> {
             push_batched_notification(Box::new(notification));
         } else {
             executor_schedule(notification);
+        }
+    }
+
+    /// Mutate the stored value in-place via a closure, then bump the
+    /// version and schedule subscriber callbacks.
+    ///
+    /// This avoids cloning the previous value during a read-modify-write
+    /// cycle.  For a `Signal<Vec<T>>`:
+    ///
+    /// ```ignore
+    /// // Without update(): two clones of the Vec
+    /// let mut v = sig.read();
+    /// v.push(item);
+    /// sig.set(v);
+    ///
+    /// // With update(): zero clones
+    /// sig.update(|v| v.push(item));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `f` panics — the signal is left in a consistent state
+    /// but the version has already been bumped.
+    pub fn update(&self, f: impl FnOnce(&mut T))
+    where
+        T: 'static,
+    {
+        let mut state = self.state.borrow_mut();
+        f(&mut state.value);
+        state.version = state.version.wrapping_add(1);
+        let subs = Self::prepare_notification(&mut state);
+        drop(state);
+        if let Some(subs) = subs {
+            Self::schedule_notification(&self.state, subs);
         }
     }
 

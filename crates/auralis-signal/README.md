@@ -21,6 +21,10 @@ Zero dependencies. `#![forbid(unsafe_code)]`. Single-threaded by design (`!Send`
 | `batch(f)` | Run `f` with deferred notifications — multiple sets, one notification |
 | `in_batch()` | Check if currently inside a batch |
 | `memo!(a, b => expr)` | Convenience macro: auto-clones captured signals before the `move` closure |
+| `Signal::update(f)` | Mutate the value in-place (avoids clone on read-modify-set) |
+| `Signal::read_untracked()` | Read without subscribing the active observer |
+| `Signal::with_untracked(f)` | Borrow without subscribing |
+| `Signal::set_if_changed(val)` | Set only if `val != current` (requires `PartialEq`) |
 | `Signal::version()` | Return the current monotonic version number |
 | `Memo::is_dirty()` | Check whether a source has changed without triggering computation |
 | `Memo::compute_count()` | Number of successful recomputations (including initial) |

@@ -5,9 +5,11 @@
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::rc::{Rc, Weak};
+
+use auralis_signal::{Memo, Signal};
 
 use crate::executor;
 use crate::Priority;
@@ -67,7 +69,7 @@ impl CallbackHandle {
 impl Drop for CallbackHandle {
     fn drop(&mut self) {
         if let Some(f) = self.cleanup.take() {
-            f();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         }
     }
 }
@@ -128,7 +130,12 @@ pub fn find_scope(scope_id: ScopeId) -> Option<TaskScope> {
                 r.get(&scope_id).and_then(|(inner_weak, suspended_weak)| {
                     let inner = inner_weak.upgrade()?;
                     let suspended = suspended_weak.upgrade()?;
-                    Some(TaskScope { inner, suspended })
+                    let cancelled = inner.borrow().cancelled.clone();
+                    Some(TaskScope {
+                        inner,
+                        cancelled,
+                        suspended,
+                    })
                 })
             } else {
                 None
@@ -347,15 +354,60 @@ struct TaskScopeInner {
     context: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
     /// Callback handles registered by bind_* functions.
     callbacks: RefCell<Vec<CallbackHandle>>,
+    /// Whether this scope has been cancelled.  Stored as `Rc<Cell<bool>>`
+    /// so it can be read/set without borrowing the `RefCell`, avoiding
+    /// re-entrant borrow failures during drop.  `TaskScope` holds a clone
+    /// of the same `Rc` for direct access.
+    cancelled: Rc<Cell<bool>>,
     /// Optional label for `dump_task_tree` output (debug feature).
     #[cfg(feature = "debug")]
     debug_label: Option<String>,
-    cancelled: bool,
     /// The executor that owns tasks spawned in this scope.
     /// Stored as `Rc` (strong reference) so the executor lives
     /// at least as long as the scope — essential for safe
     /// cancellation during drop.
     executor: executor::ExecutorRef,
+}
+
+// ---------------------------------------------------------------------------
+// JoinHandle — per-task cancellation handle
+// ---------------------------------------------------------------------------
+
+/// A handle to a spawned task, allowing individual cancellation.
+///
+/// Created by [`TaskScope::spawn`] and [`TaskScope::spawn_with_priority`].
+/// Dropping the handle does **not** cancel the task — call [`cancel`](JoinHandle::cancel)
+/// explicitly, or drop the owning [`TaskScope`] to cancel all tasks at once.
+pub struct JoinHandle {
+    task_id: TaskId,
+    executor: executor::ExecutorRef,
+}
+
+impl JoinHandle {
+    /// Cancel this specific task.
+    ///
+    /// No-op if the task has already completed or been cancelled.
+    pub fn cancel(&self) {
+        executor::cancel_task(&self.executor, self.task_id);
+    }
+
+    /// Return `true` if the task has completed (normally or via cancellation).
+    pub fn is_finished(&self) -> bool {
+        executor::is_task_finished(&self.executor, self.task_id)
+    }
+
+    /// Return the id of the wrapped task (useful for debugging).
+    pub fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+}
+
+impl fmt::Debug for JoinHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinHandle")
+            .field("task_id", &self.task_id)
+            .finish_non_exhaustive()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,10 +438,14 @@ struct TaskScopeInner {
 #[must_use]
 pub struct TaskScope {
     inner: Rc<RefCell<TaskScopeInner>>,
+    /// Whether this scope has been cancelled (dropped).  Stored outside
+    /// the `RefCell` so that [`is_cancelled`](Self::is_cancelled) can be
+    /// checked and set without borrowing — avoids re-entrant borrow
+    /// panics and ensures the cancelled flag is always set even when
+    /// the inner `RefCell` is already borrowed during drop.
+    cancelled: Rc<Cell<bool>>,
     /// Whether this scope is suspended.  Stored outside the `RefCell`
-    /// so that [`is_suspended`](Self::is_suspended) can be checked
-    /// without borrowing (avoids re-entrant borrow panics during
-    /// synchronous flush in tests).
+    /// for the same reason as `cancelled`.
     suspended: Rc<Cell<bool>>,
 }
 
@@ -407,6 +463,7 @@ impl TaskScope {
     /// `ex`.  The scope holds a strong reference, keeping the executor
     /// alive at least as long as the scope.
     pub fn with_executor(ex: &executor::ExecutorRef) -> Self {
+        let cancelled = Rc::new(Cell::new(false));
         let inner = Rc::new(RefCell::new(TaskScopeInner {
             id: alloc_scope_id(),
             task_ids: Vec::new(),
@@ -414,20 +471,25 @@ impl TaskScope {
             parent: None,
             context: RefCell::new(HashMap::new()),
             callbacks: RefCell::new(Vec::new()),
+            cancelled: Rc::clone(&cancelled),
             #[cfg(feature = "debug")]
             debug_label: None,
-            cancelled: false,
             executor: Rc::clone(ex),
         }));
         let id = inner.borrow().id;
         let suspended = Rc::new(Cell::new(false));
         register_scope(id, &inner, &suspended);
-        Self { inner, suspended }
+        Self {
+            inner,
+            cancelled,
+            suspended,
+        }
     }
 
     /// Create a child scope that inherits the parent's executor.
     pub fn new_child(parent: &Self) -> Self {
         let ex = parent.inner.borrow().executor.clone();
+        let cancelled = Rc::new(Cell::new(false));
         let inner = Rc::new(RefCell::new(TaskScopeInner {
             id: alloc_scope_id(),
             task_ids: Vec::new(),
@@ -435,22 +497,30 @@ impl TaskScope {
             parent: Some(Rc::downgrade(&parent.inner)),
             context: RefCell::new(HashMap::new()),
             callbacks: RefCell::new(Vec::new()),
+            cancelled: Rc::clone(&cancelled),
             #[cfg(feature = "debug")]
             debug_label: None,
-            cancelled: false,
             executor: ex,
         }));
         let id = inner.borrow().id;
         let suspended = Rc::new(Cell::new(false));
         register_scope(id, &inner, &suspended);
-        let child = Self { inner, suspended };
+        let child = Self {
+            inner,
+            cancelled,
+            suspended,
+        };
         parent.inner.borrow_mut().children.push(child.clone_inner());
         child
     }
 
     /// Spawn a future in this scope at low priority.
-    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
-        self.spawn_with_priority(Priority::Low, future);
+    ///
+    /// Returns a [`JoinHandle`] that can cancel this individual task.
+    /// Drop the handle to detach (the task keeps running until the
+    /// scope is dropped).
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> JoinHandle {
+        self.spawn_with_priority(Priority::Low, future)
     }
 
     /// Spawn a future in this scope at the given priority.
@@ -458,14 +528,19 @@ impl TaskScope {
     /// The current scope is set to `self` during the spawn so that any
     /// synchronous work inside the future constructor (e.g. `bind_text`)
     /// can discover the owning scope via [`current_scope`].
+    ///
+    /// Returns a [`JoinHandle`] that can cancel this individual task.
     pub fn spawn_with_priority(
         &self,
         priority: Priority,
         future: impl Future<Output = ()> + 'static,
-    ) {
+    ) -> JoinHandle {
         let inner = self.inner.borrow();
-        if inner.cancelled {
-            return;
+        if inner.cancelled.get() {
+            return JoinHandle {
+                task_id: 0,
+                executor: Rc::clone(&inner.executor),
+            };
         }
         let ex = Rc::clone(&inner.executor);
         let task_id = executor::with_executor(&ex, || {
@@ -475,6 +550,56 @@ impl TaskScope {
         });
         drop(inner);
         self.inner.borrow_mut().task_ids.push(task_id);
+        JoinHandle {
+            task_id,
+            executor: ex,
+        }
+    }
+
+    /// Spawn a task that calls `f` with the new value whenever `sig` changes.
+    ///
+    /// This is a convenience wrapper around the common pattern:
+    ///
+    /// ```ignore
+    /// scope.spawn({
+    ///     let s = sig.clone();
+    ///     async move { loop { s.changed().await; f(&s.read()); } }
+    /// });
+    /// ```
+    ///
+    /// Returns a [`JoinHandle`] for individual cancellation.
+    pub fn watch<T: Clone + 'static>(
+        &self,
+        sig: &Signal<T>,
+        f: impl FnMut(&T) + 'static,
+    ) -> JoinHandle {
+        let s = sig.clone();
+        let mut f = f;
+        self.spawn(async move {
+            loop {
+                s.changed().await;
+                f(&s.read());
+            }
+        })
+    }
+
+    /// Spawn a task that re-runs `effect` whenever any [`Signal`] read
+    /// inside it changes — using a [`Memo`](auralis_signal::Memo) internally
+    /// to auto-track dependencies.
+    ///
+    /// The effect is run once immediately to discover its dependencies.
+    /// Subsequent runs happen on the executor when a dependency changes.
+    ///
+    /// Returns a [`JoinHandle`] for individual cancellation.
+    pub fn watch_effect(&self, effect: impl Fn() + 'static) -> JoinHandle {
+        let memo = Memo::new(effect);
+        self.spawn(async move {
+            loop {
+                memo.changed().await;
+                #[allow(clippy::let_unit_value, clippy::ignored_unit_patterns)]
+                let _ = memo.read();
+            }
+        })
     }
 
     // -- callback lifecycle ------------------------------------------------
@@ -486,10 +611,22 @@ impl TaskScope {
     /// cleaned up when the owning component is destroyed.
     pub fn register_callback_handle(&self, handle: CallbackHandle) {
         let inner = self.inner.borrow();
-        if inner.cancelled {
+        if inner.cancelled.get() {
             return;
         }
         inner.callbacks.borrow_mut().push(handle);
+    }
+
+    /// Register a cleanup function that runs when this scope is dropped.
+    ///
+    /// Equivalent to `register_callback_handle(CallbackHandle::new(f))`.
+    ///
+    /// Cleanup functions run before spawned tasks are cancelled, so they
+    /// can safely interact with signals and other resources.
+    ///
+    /// If the scope is already cancelled, `f` is dropped immediately.
+    pub fn on_cleanup(&self, f: impl FnOnce() + 'static) {
+        self.register_callback_handle(CallbackHandle::new(f));
     }
 
     // -- context -----------------------------------------------------------
@@ -556,7 +693,7 @@ impl TaskScope {
     /// A cancelled scope silently ignores [`spawn`](TaskScope::spawn) calls.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.inner.borrow().cancelled
+        self.cancelled.get()
     }
 
     // -- debugging ----------------------------------------------------------
@@ -590,6 +727,7 @@ impl TaskScope {
     fn clone_inner(&self) -> Self {
         Self {
             inner: Rc::clone(&self.inner),
+            cancelled: Rc::clone(&self.cancelled),
             suspended: Rc::clone(&self.suspended),
         }
     }
@@ -640,17 +778,17 @@ impl TaskScope {
         }
         self.suspended.set(false);
 
-        let (scope_id, children) = {
+        let (task_ids, children) = {
             let inner = self.inner.borrow();
-            let id = inner.id;
+            let tids = inner.task_ids.clone();
             let children: Vec<TaskScope> =
                 inner.children.iter().map(TaskScope::clone_inner).collect();
-            (id, children)
+            (tids, children)
         };
 
         // Enqueue all tasks belonging to this scope.
         let ex = Rc::clone(&self.inner.borrow().executor);
-        executor::enqueue_scope_tasks_on(&ex, scope_id);
+        executor::enqueue_scope_tasks_on(&ex, &task_ids);
 
         // Resume children (cascading).
         for child in &children {
@@ -693,25 +831,24 @@ impl Drop for TaskScope {
             return;
         }
 
+        // Always set cancelled first — this Cell is outside the RefCell
+        // and always writable, so the scope is marked cancelled even if
+        // we can't do full cleanup below.
+        self.cancelled.set(true);
+
         let Ok(mut inner) = self.inner.try_borrow_mut() else {
-            // Already borrowed — this is a re-entrant drop (e.g. a
-            // callback held the last clone of this scope).  If this
-            // was the last clone, resources will leak.
-            #[cfg(debug_assertions)]
-            {
-                eprintln!(
-                    "[auralis-task] WARNING: TaskScope::drop cannot borrow inner \
-                     (already borrowed). If this was the last clone, tasks and \
-                     callbacks will leak. Avoid dropping the last TaskScope clone \
-                     inside a callback or during executor flush."
-                );
-            }
+            // Already borrowed — re-entrant drop (e.g. a callback or
+            // spawned task dropped the last clone during executor flush).
+            // Cancelled flag is set, so future spawns are rejected and
+            // the executor will clean up tasks on the next flush.
+            eprintln!(
+                "[auralis-task] WARNING: TaskScope::drop cannot borrow inner \
+                 (already borrowed). Tasks and callbacks in this scope will \
+                 be cleaned up on the next executor flush. Avoid dropping \
+                 the last TaskScope clone inside a callback."
+            );
             return;
         };
-        if inner.cancelled {
-            return;
-        }
-        inner.cancelled = true;
 
         // ---- drop callback handles first ---------------------------------
         inner.callbacks.borrow_mut().clear();
@@ -736,18 +873,19 @@ impl Drop for TaskScope {
         // ---- cancel leaves → root ---------------------------------------
         for scope_rc in descendants.iter().rev() {
             let mut scope = scope_rc.borrow_mut();
-            if scope.cancelled {
+            if scope.cancelled.get() {
                 continue;
             }
-            scope.cancelled = true;
+            scope.cancelled.set(true);
 
             // Drop callbacks before tasks.
             scope.callbacks.borrow_mut().clear();
 
             if !scope.task_ids.is_empty() {
                 let ex = Rc::clone(&scope.executor);
-                let dropped_futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
-                    executor::cancel_scope_tasks_on(&ex, scope.id);
+                let task_ids = std::mem::take(&mut scope.task_ids);
+                let dropped_futures =
+                    executor::cancel_scope_tasks_on(&ex, &task_ids);
                 drop(dropped_futures);
             }
             scope.context.borrow_mut().clear();
@@ -757,7 +895,8 @@ impl Drop for TaskScope {
         // ---- cancel own tasks -------------------------------------------
         if !inner.task_ids.is_empty() {
             let ex = Rc::clone(&inner.executor);
-            let dropped_futures = executor::cancel_scope_tasks_on(&ex, inner.id);
+            let task_ids = std::mem::take(&mut inner.task_ids);
+            let dropped_futures = executor::cancel_scope_tasks_on(&ex, &task_ids);
             drop(dropped_futures);
         }
 

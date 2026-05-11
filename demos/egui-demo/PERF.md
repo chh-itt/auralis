@@ -6,10 +6,10 @@ Measured on Windows 11, Rust 1.80+, `cargo run --example perf_report --release`.
 
 | Stage | Time |
 |-------|------|
-| filter (full scan) | 3.27 ms |
-| aggregate (sort 10 groups) | 15.53 ms |
-| format (string building) | 0.02 ms |
-| **TOTAL** | **18.82 ms** |
+| filter (full scan) | 3.23 ms |
+| aggregate (sort 10 groups) | 11.81 ms |
+| format (string building) | 0.01 ms |
+| **TOTAL** | **15.06 ms** |
 
 > 60 fps frame budget = 16.67 ms. Without caching, this pipeline drops frames at 500K.
 
@@ -19,10 +19,10 @@ Measured on Windows 11, Rust 1.80+, `cargo run --example perf_report --release`.
 
 | Data size | Cache hit (clean read) | Cache miss (dirty → recompute) |
 |-----------|----------------------|-------------------------------|
-| 100K | 0.00 ms | 3.47 ms |
-| 250K | 0.00 ms | 9.60 ms |
-| 500K | 0.00 ms | 21.93 ms |
-| 1M | 0.00 ms | 49.10 ms |
+| 100K | 0.01 ms | 4.45 ms |
+| 250K | 0.00 ms | 8.85 ms |
+| 500K | 0.00 ms | 18.01 ms |
+| 1M | 0.00 ms | 39.51 ms |
 
 Cache hit cost is sub-microsecond (`Cell::get` + `Rc` deref). Zero allocation.
 
@@ -34,25 +34,48 @@ Three approaches compared at different parameter-change frequencies:
 
 | Change rate | `no_cache` | `manual_cache` | `auralis_memo` | Memo cache hits |
 |-------------|-----------|---------------|----------------|-----------------|
-| 1% (typical UI) | 13.29 ms/fr | 0.14 ms/fr | **0.15 ms/fr** | 99% |
-| 10% | 12.94 ms/fr | 1.29 ms/fr | **1.62 ms/fr** | 90% |
-| 50% (pathological) | 12.97 ms/fr | 6.46 ms/fr | **8.29 ms/fr** | 50% |
+| 1% (typical UI) | 13.16 ms/fr | 0.13 ms/fr | **0.15 ms/fr** | 99% |
+| 10% | 12.88 ms/fr | 1.27 ms/fr | **1.62 ms/fr** | 90% |
+| 50% (pathological) | 12.76 ms/fr | 6.37 ms/fr | **7.96 ms/fr** | 50% |
+
+### Per-scenario cumulative totals (1000 frames each)
+
+| Change rate | manual_cache total | auralis_memo total | overhead |
+|-------------|-------------------|-------------------|----------|
+| 1% | 127.1 ms | 146.3 ms | +15.1% |
+| 10% | 1,267 ms | 1,615 ms | +27.5% |
+| 50% | 6,373 ms | 7,957 ms | +24.9% |
+| **3000-frame grand total** | **7,767 ms** | **9,719 ms** | **+25.1%** |
 
 - **`no_cache`**: recompute everything every frame. Fast to write (3 lines), always correct, always slow.
 - **`manual_cache`**: version-check + cascade invalidation. ~20 lines for 3 stages. Correct and fast, but fragile when the pipeline changes.
 - **`auralis_memo`**: `Memo::new` per stage (or `memo!` macro). 3 lines. Automatic dependency tracking with incremental subscription updates — shared dependencies are kept across recomputes, only new/removed ones trigger subscribe/unsubscribe.
 
-On recompute, Memo carries ~22-29% overhead vs. manual cache (observer setup/teardown + subscription diff). This is the cost of *not writing invalidation logic by hand*.
+On recompute, Memo carries ~15-28% overhead vs. manual cache (observer setup/teardown + subscription diff). At idle (no parameter changes), the absolute difference is 0.02 ms/frame — imperceptible. This is the cost of *not writing invalidation logic by hand*.
 
 ---
 
 ## Signal Write Throughput
 
 ```
-1,000,000 Signal::set() calls: 1.19 ms
-≈ 837,000 sets/ms
-≈ 1.2 ns/set
+1,000,000 Signal::set() calls: 1.29 ms
+≈ 777,000 sets/ms
+≈ 1.3 ns/set
 ```
+
+---
+
+## Scope Stress Benchmark (new in v0.1.7)
+
+| Benchmark | Time | What it tests |
+|-----------|------|---------------|
+| 100 scopes × 10 tasks, batch drop | 465.6 µs | Scope churn / cancel path |
+| Suspend + resume (1000 tasks) | 1.5 µs | Enqueue path (direct task-id lookup) |
+| Wide tree 50×50, drop (~2550 tasks) | 4.68 ms | Broad tree cancellation |
+
+v0.1.7 optimised scope cancel/enqueue from O(total-tasks) full-table scan
+to O(scope-tasks) direct lookup, using the task-id list already maintained
+by each scope.
 
 ---
 
