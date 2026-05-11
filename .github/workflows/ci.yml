@@ -33,10 +33,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: cargo test
+    name: cargo test (stable)
     needs: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  test-msrv:
+    name: cargo test (MSRV 1.80)
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80
       - run: cargo test --workspace
