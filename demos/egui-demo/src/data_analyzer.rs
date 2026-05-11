@@ -366,6 +366,8 @@ pub struct AnalyzerState {
     pub without: WithoutAuralisAnalyzer,
     pub with: WithAuralisAnalyzer,
     data_size: usize,
+    filter_params: FilterParams,
+    aggregate_mode: AggregateMode,
     left_history: ComputeTimeHistory,
     right_history: ComputeTimeHistory,
     frame_count: u64,
@@ -377,6 +379,8 @@ impl Default for AnalyzerState {
             without: WithoutAuralisAnalyzer::new(500_000),
             with: WithAuralisAnalyzer::new(500_000),
             data_size: 500_000,
+            filter_params: FilterParams::default(),
+            aggregate_mode: AggregateMode::Median,
             left_history: ComputeTimeHistory::new(120),
             right_history: ComputeTimeHistory::new(120),
             frame_count: 0,
@@ -403,19 +407,17 @@ impl AnalyzerState {
 const DATA_SIZE_OPTIONS: &[usize] = &[100_000, 250_000, 500_000, 1_000_000];
 
 pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
-    let mut filter = FilterParams::default();
-    let mut mode = AggregateMode::Median;
     let mut new_size = state.data_size;
 
     ui.horizontal(|ui| {
         ui.label("Date range:");
         ui.add(
-            egui::Slider::new(&mut filter.date_start, 0..=365)
+            egui::Slider::new(&mut state.filter_params.date_start, 0..=365)
                 .text("start")
                 .step_by(1.0),
         );
         ui.add(
-            egui::Slider::new(&mut filter.date_end, 0..=365)
+            egui::Slider::new(&mut state.filter_params.date_end, 0..=365)
                 .text("end")
                 .step_by(1.0),
         );
@@ -425,7 +427,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
         ui.label("Categories:");
         ui.horizontal_wrapped(|ui| {
             for (i, name) in CATEGORY_NAMES.iter().enumerate() {
-                ui.toggle_value(&mut filter.categories[i], *name);
+                ui.toggle_value(&mut state.filter_params.categories[i], *name);
             }
         });
     });
@@ -433,11 +435,23 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
     ui.horizontal(|ui| {
         ui.label("Aggregate:");
         egui::ComboBox::from_id_salt("agg_mode")
-            .selected_text(mode.name())
+            .selected_text(state.aggregate_mode.name())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut mode, AggregateMode::Sum, "Sum");
-                ui.selectable_value(&mut mode, AggregateMode::Median, "Median");
-                ui.selectable_value(&mut mode, AggregateMode::P95, "P95");
+                ui.selectable_value(
+                    &mut state.aggregate_mode,
+                    AggregateMode::Sum,
+                    "Sum",
+                );
+                ui.selectable_value(
+                    &mut state.aggregate_mode,
+                    AggregateMode::Median,
+                    "Median",
+                );
+                ui.selectable_value(
+                    &mut state.aggregate_mode,
+                    AggregateMode::P95,
+                    "P95",
+                );
             });
 
         ui.separator();
@@ -460,7 +474,10 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
         cols[0].separator();
 
         let start = std::time::Instant::now();
-        let left_result = state.without.compute(&filter, mode).to_string();
+        let left_result = state
+            .without
+            .compute(&state.filter_params, state.aggregate_mode)
+            .to_string();
         let left_elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
         state.left_history.push(left_elapsed);
@@ -510,8 +527,8 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
         cols[1].label("(Memo chain — automatic dependency tracking)");
         cols[1].separator();
 
-        state.with.set_filter(filter);
-        state.with.set_mode(mode);
+        state.with.set_filter(state.filter_params.clone());
+        state.with.set_mode(state.aggregate_mode);
 
         let start = std::time::Instant::now();
         let right_result = state.with.compute_result();
