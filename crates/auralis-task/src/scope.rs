@@ -884,8 +884,7 @@ impl Drop for TaskScope {
             if !scope.task_ids.is_empty() {
                 let ex = Rc::clone(&scope.executor);
                 let task_ids = std::mem::take(&mut scope.task_ids);
-                let dropped_futures =
-                    executor::cancel_scope_tasks_on(&ex, &task_ids);
+                let dropped_futures = executor::cancel_scope_tasks_on(&ex, &task_ids);
                 drop(dropped_futures);
             }
             scope.context.borrow_mut().clear();

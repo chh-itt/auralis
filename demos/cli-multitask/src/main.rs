@@ -16,8 +16,8 @@ fn print_status(workers: &[(usize, u32, u32)]) {
         let filled = (done as usize * bar_w / total as usize).min(bar_w);
         print!(
             "[{}{}] w{id}: {done}/{total}  ",
-            "█".repeat(filled),
-            "░".repeat(bar_w - filled),
+            "#".repeat(filled),
+            ".".repeat(bar_w - filled),
         );
     }
     print!("\r");
@@ -68,7 +68,8 @@ fn main() {
 
     // ---- Auralis executor + scope ----
     let ex = Executor::new_instance();
-    let root = TaskScope::with_executor(&ex);
+    let mut root = Some(TaskScope::with_executor(&ex));
+    let root_ref = root.as_ref().unwrap();
 
     // ---- progress state (owned by main thread) ----
     let progress = Signal::new(
@@ -89,13 +90,12 @@ fn main() {
         handles.push(spawn_worker(id, chunks, delay, tx2, flag));
     }
 
-    // ---- register cancel flags in scope → drop fires all ----
-    let worker_scope = TaskScope::new_child(&root);
+    // ---- register cancel flags in root scope → drop fires all ----
     for flag in &cancel_flags {
         let f = Arc::clone(flag);
-        worker_scope.register_callback_handle(auralis_task::CallbackHandle::new(move || {
+        root_ref.on_cleanup(move || {
             f.store(true, Ordering::Relaxed);
-        }));
+        });
     }
 
     // ---- Ctrl+C handler (runs on signal thread — must be Send) ----
@@ -109,7 +109,6 @@ fn main() {
 
     // ---- main loop ----
     let start = std::time::Instant::now();
-    let mut worker_scope = Some(worker_scope); // move to stack for drop timing
     loop {
         // Drain channel → update signal on main thread.
         while let Ok((id, done)) = rx.try_recv() {
@@ -133,9 +132,9 @@ fn main() {
             break;
         }
 
-        // Check if Ctrl+C was pressed — drop scope on main thread.
+        // Check if Ctrl+C was pressed — drop root scope on main thread.
         if cancel_signal.load(Ordering::Relaxed) {
-            drop(worker_scope.take());
+            drop(root.take());
             // Give threads a moment to observe the cancel flag.
             std::thread::sleep(Duration::from_millis(200));
             println!("All workers cancelled in {:.1}s.", start.elapsed().as_secs_f64());
@@ -145,7 +144,7 @@ fn main() {
         std::thread::sleep(Duration::from_millis(50));
     }
     // Ensure scope is dropped.
-    drop(worker_scope);
+    drop(root);
 
     for h in handles {
         h.join().ok();
