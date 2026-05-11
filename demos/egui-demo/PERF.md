@@ -65,13 +65,18 @@ On recompute, Memo carries ~15-28% overhead vs. manual cache (observer setup/tea
 
 ---
 
-## Scope Stress Benchmark (new in v0.1.7)
+## Scope Stress Benchmark (v0.1.7)
+
+Run: `cargo run --example scope_bench --release -p auralis-task`
 
 | Benchmark | Time | What it tests |
 |-----------|------|---------------|
-| 100 scopes × 10 tasks, batch drop | 465.6 µs | Scope churn / cancel path |
-| Suspend + resume (1000 tasks) | 1.5 µs | Enqueue path (direct task-id lookup) |
-| Wide tree 50×50, drop (~2550 tasks) | 4.68 ms | Broad tree cancellation |
+| Scope create + destroy (100 tasks) | 19.3 µs | Basic lifecycle |
+| Deep nesting drop (200 levels) | 130.6 µs | Deep tree cancellation |
+| Priority ordering (1000 low + 10 high) | 197.8 µs | Priority queue + batched flush |
+| 100 scopes × 10 tasks, batch drop | 286.3 µs | Scope churn / cancel path |
+| Suspend + resume (1000 tasks) | 0.84 µs | Enqueue path (direct task-id lookup) |
+| Wide tree 50×50, drop (~2550 tasks) | 2.73 ms | Broad tree cancellation |
 
 v0.1.7 optimised scope cancel/enqueue from O(total-tasks) full-table scan
 to O(scope-tasks) direct lookup, using the task-id list already maintained
