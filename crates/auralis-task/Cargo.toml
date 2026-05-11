@@ -11,16 +11,19 @@ repository.workspace = true
 default = []
 debug = []
 ssr-tokio = ["dep:tokio"]
+# Enable criterion benchmarks.  Feature-gated so MSRV 1.80 CI can
+# skip resolving criterion's dependency tree (clap -> clap_lex
+# requires edition 2024 / Rust 1.85+).
+benchmarks = ["dep:criterion"]
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = "0.5"
+[dependencies]
+auralis-signal.workspace = true
+criterion = { version = "0.5", optional = true }
+
+# Optional — for SSR multi-request isolation with tokio task_local!
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros"] }
 
 [[bench]]
 name = "task_bench"
 harness = false
-
-[dependencies]
-auralis-signal.workspace = true
-
-# Optional — for SSR multi-request isolation with tokio task_local!
-tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros"] }
+required-features = ["benchmarks"]

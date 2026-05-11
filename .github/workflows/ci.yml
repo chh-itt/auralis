@@ -48,4 +48,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.80
-      - run: cargo test --workspace
+      # --lib skips integration tests and benches; criterion is
+      # feature-gated (benchmarks) so dev-deps are not resolved.
+      - run: cargo test --workspace --lib

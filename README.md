@@ -149,6 +149,7 @@ docs/
 |---------|-------|---------|
 | `debug` | `auralis-task` | `dump_task_tree()` diagnostic |
 | `ssr-tokio` | `auralis-task` | Tokio task-local storage for multi-request SSR |
+| `benchmarks` | `auralis-task` | Criterion benchmarks (`cargo bench --features benchmarks`) |
 
 ## Running
 
@@ -165,7 +166,7 @@ cargo clippy --all-targets -- -D warnings
 
 # Benchmarks (host-side, non-Wasm)
 cargo bench -p auralis-signal
-cargo bench -p auralis-task
+cargo bench -p auralis-task --features benchmarks
 
 # Example
 cargo run --example counter
