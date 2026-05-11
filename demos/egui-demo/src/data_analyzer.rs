@@ -134,7 +134,7 @@ fn format_results(result: &StatsResult, mode: AggregateMode) -> String {
         AggregateMode::Median => out.push_str("Median\n"),
         AggregateMode::P95 => out.push_str("P95\n"),
     }
-    out.push_str("──────────  ──────────  ──────────\n");
+    out.push_str("----------  ----------  ----------\n");
     for r in &result.regions {
         let val = match mode {
             AggregateMode::Sum => format!("${:.2}", r.sum),
@@ -474,7 +474,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
             state.left_history.avg(),
         ));
 
-        // Mini inline chart: each char = 1 frame, scaled
+        // Mini inline chart: each char = 1 frame, scaled (ASCII to avoid font issues)
         if state.left_history.len() >= 2 {
             let max_val = state.left_history.max().max(0.001);
             let bar = state
@@ -483,8 +483,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
                 .iter()
                 .map(|&t| {
                     let ratio = (t / max_val).min(1.0);
-                    ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-                        [(ratio * 7.0) as usize]
+                    ["_", ".", "-", "~", "=", "+", "*", "#"][(ratio * 7.0) as usize]
                 })
                 .collect::<String>();
             cols[0].label(format!("  {}", bar));
@@ -529,7 +528,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
             state.right_history.avg(),
         ));
 
-        // Mini inline chart
+        // Mini inline chart: ASCII to avoid font issues
         if state.right_history.len() >= 2 {
             let max_val = state.right_history.max().max(0.001);
             let bar = state
@@ -538,8 +537,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
                 .iter()
                 .map(|&t| {
                     let ratio = (t / max_val).min(1.0);
-                    ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-                        [(ratio * 7.0) as usize]
+                    ["_", ".", "-", "~", "=", "+", "*", "#"][(ratio * 7.0) as usize]
                 })
                 .collect::<String>();
             cols[1].label(format!("  {}", bar));

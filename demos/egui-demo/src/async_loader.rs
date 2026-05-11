@@ -328,7 +328,7 @@ pub fn render_loader_ui(ui: &mut Ui, state: &mut LoaderState) {
              for flag in &self.cancel_flags {\n    \
                  flag.store(true, Ordering::Relaxed);\n\
              }\n\
-             // ⚠ Adding a new source? Don't forget\n\
+             // !! Adding a new source? Don't forget\n\
              //   to push its cancel flag to the Vec!",
         );
 
@@ -346,7 +346,7 @@ pub fn render_loader_ui(ui: &mut Ui, state: &mut LoaderState) {
         cols[1].monospace(
             "// Cancel all — one line:\n\
              self.loading_scope = None;\n\
-             // ✓ Scope owns all CallbackHandles.\n\
+             // [OK] Scope owns all CallbackHandles.\n\
              //   BFS iterates them all. Can't miss.",
         );
 
@@ -369,15 +369,15 @@ fn render_progress_bars(ui: &mut Ui, results: &HashMap<SourceId, LoadProgress>) 
                         ui.label(format!("{}  [          ] pending", src.name));
                     }
                     LoadProgress::Chunk(n) => {
-                        let bar = "█".repeat((n + 1) as usize);
-                        let space = "░".repeat(10 - (n + 1) as usize);
+                        let bar = "#".repeat((n + 1) as usize);
+                        let space = ".".repeat(10 - (n + 1) as usize);
                         ui.label(format!("{}  [{}{}] {}/10", src.name, bar, space, n + 1));
                     }
                     LoadProgress::Done(msg) => {
-                        ui.colored_label(egui::Color32::GREEN, format!("{}  ✓ {}", src.name, msg));
+                        ui.colored_label(egui::Color32::GREEN, format!("{}  [OK] {}", src.name, msg));
                     }
                     LoadProgress::Error(e) => {
-                        ui.colored_label(egui::Color32::RED, format!("{}  ✗ {}", src.name, e));
+                        ui.colored_label(egui::Color32::RED, format!("{}  [ERR] {}", src.name, e));
                     }
                 }
             }
