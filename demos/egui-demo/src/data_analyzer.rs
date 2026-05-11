@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use egui::Ui;
 
 use crate::data_gen::{generate_sales, SaleRecord, CATEGORY_NAMES, REGION_NAMES};
@@ -269,11 +271,11 @@ impl WithAuralisAnalyzer {
     }
 
     fn set_filter(&self, params: FilterParams) {
-        self.filter_params.set(params);
+        self.filter_params.set_if_changed(params);
     }
 
     fn set_mode(&self, mode: AggregateMode) {
-        self.aggregate_mode.set(mode);
+        self.aggregate_mode.set_if_changed(mode);
     }
 
     fn resize(&self, size: usize) {
@@ -305,6 +307,58 @@ impl WithAuralisAnalyzer {
 }
 
 // ---------------------------------------------------------------------------
+// Per-frame compute-time history
+// ---------------------------------------------------------------------------
+
+struct ComputeTimeHistory {
+    times: VecDeque<f64>,
+    max_frames: usize,
+}
+
+impl ComputeTimeHistory {
+    fn new(max_frames: usize) -> Self {
+        Self {
+            times: VecDeque::with_capacity(max_frames),
+            max_frames,
+        }
+    }
+
+    fn push(&mut self, ms: f64) {
+        self.times.push_back(ms);
+        if self.times.len() > self.max_frames {
+            self.times.pop_front();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.times.clear();
+    }
+
+    fn min(&self) -> f64 {
+        self.times.iter().cloned().fold(f64::INFINITY, f64::min)
+    }
+
+    fn max(&self) -> f64 {
+        self.times
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn avg(&self) -> f64 {
+        let len = self.times.len();
+        if len == 0 {
+            return 0.0;
+        }
+        self.times.iter().sum::<f64>() / len as f64
+    }
+
+    fn len(&self) -> usize {
+        self.times.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared state for Tab 2
 // ---------------------------------------------------------------------------
 
@@ -312,6 +366,9 @@ pub struct AnalyzerState {
     pub without: WithoutAuralisAnalyzer,
     pub with: WithAuralisAnalyzer,
     data_size: usize,
+    left_history: ComputeTimeHistory,
+    right_history: ComputeTimeHistory,
+    frame_count: u64,
 }
 
 impl Default for AnalyzerState {
@@ -320,6 +377,9 @@ impl Default for AnalyzerState {
             without: WithoutAuralisAnalyzer::new(500_000),
             with: WithAuralisAnalyzer::new(500_000),
             data_size: 500_000,
+            left_history: ComputeTimeHistory::new(120),
+            right_history: ComputeTimeHistory::new(120),
+            frame_count: 0,
         }
     }
 }
@@ -330,6 +390,8 @@ impl AnalyzerState {
             self.data_size = new_size;
             self.without.resize(new_size);
             self.with.resize(new_size);
+            self.left_history.clear();
+            self.right_history.clear();
         }
     }
 }
@@ -387,6 +449,7 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
     });
 
     state.resize_if_needed(new_size);
+    state.frame_count += 1;
 
     ui.separator();
 
@@ -400,7 +463,33 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
         let left_result = state.without.compute(&filter, mode).to_string();
         let left_elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
-        cols[0].label(format!("Compute time: {:.2} ms", left_elapsed));
+        state.left_history.push(left_elapsed);
+
+        cols[0].label(format!(
+            "Compute: {:.3} ms  |  history ({} frames): min={:.3}  max={:.3}  avg={:.3} ms",
+            left_elapsed,
+            state.left_history.len(),
+            state.left_history.min(),
+            state.left_history.max(),
+            state.left_history.avg(),
+        ));
+
+        // Mini inline chart: each char = 1 frame, scaled
+        if state.left_history.len() >= 2 {
+            let max_val = state.left_history.max().max(0.001);
+            let bar = state
+                .left_history
+                .times
+                .iter()
+                .map(|&t| {
+                    let ratio = (t / max_val).min(1.0);
+                    ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+                        [(ratio * 7.0) as usize]
+                })
+                .collect::<String>();
+            cols[0].label(format!("  {}", bar));
+        }
+
         cols[0].label("Code: ~20 lines of invalidation logic");
         cols[0].monospace(
             "// Manual cascade — must be maintained:\n\
@@ -429,7 +518,33 @@ pub fn render_analyzer_ui(ui: &mut Ui, state: &mut AnalyzerState) {
         let right_result = state.with.compute_result();
         let right_elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
-        cols[1].label(format!("Compute time: {:.2} ms", right_elapsed));
+        state.right_history.push(right_elapsed);
+
+        cols[1].label(format!(
+            "Compute: {:.3} ms  |  history ({} frames): min={:.3}  max={:.3}  avg={:.3} ms",
+            right_elapsed,
+            state.right_history.len(),
+            state.right_history.min(),
+            state.right_history.max(),
+            state.right_history.avg(),
+        ));
+
+        // Mini inline chart
+        if state.right_history.len() >= 2 {
+            let max_val = state.right_history.max().max(0.001);
+            let bar = state
+                .right_history
+                .times
+                .iter()
+                .map(|&t| {
+                    let ratio = (t / max_val).min(1.0);
+                    ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+                        [(ratio * 7.0) as usize]
+                })
+                .collect::<String>();
+            cols[1].label(format!("  {}", bar));
+        }
+
         cols[1].label("Code: 1 Memo::new per stage = 3 lines");
         cols[1].monospace(
             "// Auto dependency tracking:\n\

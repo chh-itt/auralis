@@ -259,6 +259,9 @@ fn main() {
         "", "───────", "───────────", "───────────"
     );
 
+    let mut grand_manual_total = 0.0;
+    let mut grand_memo_total = 0.0;
+
     for &(label, change_n) in scenarios {
         let frames = 1000;
 
@@ -373,7 +376,25 @@ fn main() {
             am_avg,
             (frames as usize - (fm.compute_count() as usize - 1)) * 100 / frames as usize,
         );
+        let mc_ms = manual_cache_total.as_secs_f64() * 1000.0;
+        let am_ms = memo_total.as_secs_f64() * 1000.0;
+        grand_manual_total += mc_ms;
+        grand_memo_total += am_ms;
+
+        println!(
+            "    Cumulative 1000fr total: manual={:.2}ms  auralis={:.2}ms  overhead={:.1}%",
+            mc_ms,
+            am_ms,
+            (am_ms - mc_ms) / mc_ms * 100.0,
+        );
     }
+
+    println!(
+        "\n  --- 3000-frame grand total ---\n  manual_cache: {:.2}ms  auralis_memo: {:.2}ms  overall overhead: {:.1}%",
+        grand_manual_total,
+        grand_memo_total,
+        (grand_memo_total - grand_manual_total) / grand_manual_total * 100.0,
+    );
 
     println!();
 
