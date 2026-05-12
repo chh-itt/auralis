@@ -5,6 +5,8 @@ name = "auralis-wasm-counter"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal Wasm reactive counter — Signal + Memo + timer::sleep in the browser"
+repository = "https://github.com/chh-itt/auralis"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]

@@ -2,32 +2,232 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Auralis Wasm Counter</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auralis Demo — Reactive Kernel for Rust</title>
     <style>
-        body { font-family: monospace; max-width: 480px; margin: 2rem auto; }
-        button { font-size: 1.2rem; padding: 0.3rem 1rem; margin: 0 0.3rem; cursor: pointer; }
-        .value { font-size: 2rem; font-weight: bold; }
-        .memo { color: #555; margin-left: 1rem; }
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --dim: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --orange: #d2991d;
+            --purple: #a371f7;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+        header {
+            text-align: center;
+            padding: 2rem 1rem 1rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.8rem; color: #f0f6fc; }
+        header p { color: var(--dim); font-size: 0.95rem; margin-top: 0.25rem; }
+        header a { color: var(--accent); }
+
+        main { max-width: 900px; margin: 0 auto; padding: 0 1rem 2rem; }
+
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+        @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.2rem;
+        }
+        .card h2 { font-size: 1.1rem; color: #f0f6fc; margin-bottom: 0.15rem; }
+        .card .sub { font-size: 0.8rem; color: var(--dim); margin-bottom: 0.8rem; }
+        .card.full { grid-column: 1 / -1; }
+
+        .value {
+            font-size: 1.6rem;
+            font-weight: 700;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            color: var(--accent);
+            display: inline-block;
+            min-width: 2rem;
+            text-align: center;
+        }
+        .value-sm {
+            font-size: 1.2rem;
+            font-weight: 600;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            color: var(--green);
+        }
+        .val-label { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+        button {
+            font-size: 0.85rem;
+            padding: 0.35rem 0.8rem;
+            margin: 0.2rem 0.25rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            cursor: pointer;
+            background: #21262d;
+            color: var(--text);
+            transition: background 0.15s, border-color 0.15s;
+            font-family: inherit;
+        }
+        button:hover { background: #30363d; border-color: #8b949e; }
+        button.accent { background: #1f6feb33; border-color: var(--accent); color: var(--accent); }
+        button.accent:hover { background: #1f6feb55; }
+        button.danger { background: #da363333; border-color: var(--red); color: var(--red); }
+        button.danger:hover { background: #da363355; }
+        button:active { transform: scale(0.97); }
+
+        .row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0; }
+
+        #task-list { min-height: 3rem; }
+        .task-entry {
+            display: inline-flex; align-items: center; gap: 0.4rem;
+            background: #0d1117; border: 1px solid var(--border);
+            border-radius: 4px; padding: 0.25rem 0.6rem;
+            margin: 0.2rem; font-size: 0.85rem; font-family: monospace;
+        }
+        .task-entry .dot {
+            width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+            background: var(--green);
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        #event-log {
+            background: #0d1117;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.6rem 0.8rem;
+            max-height: 180px;
+            overflow-y: auto;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.78rem;
+            color: #c9d1d9;
+            min-height: 3rem;
+        }
+        #event-log .entry { padding: 2px 0; }
+
+        .highlight-batch { color: var(--green); }
+        .highlight-seq { color: var(--orange); }
+
+        footer { text-align: center; font-size: 0.78rem; color: var(--dim); padding: 1rem; }
+        footer a { color: var(--accent); }
     </style>
 </head>
 <body>
-    <h1>Auralis Wasm Counter</h1>
-    <p>Signal + Memo + timer::sleep in the browser.</p>
 
+<header>
+    <h1>Auralis Demo</h1>
     <p>
-        Count: <span id="count" class="value">0</span>
-        <span id="doubled" class="memo"></span>
+        Reactive kernel for Rust — <code>Signal&lt;T&gt;</code> + <code>TaskScope</code> in the browser.
+        <a href="https://github.com/chh-itt/auralis" target="_blank">GitHub</a>
     </p>
-    <button id="inc">+1</button>
-    <button id="dec">-1</button>
-    <button id="auto">Auto +1/s</button>
-    <button id="stop">Stop</button>
+</header>
 
-    <p><small>Zero unsafe, zero dependencies (signal crate). <a href="https://github.com/chh-itt/auralis">auralis on GitHub</a></small></p>
+<main>
 
-    <script type="module">
-        import init from './pkg/auralis_wasm_counter.js';
-        init();
-    </script>
+<!-- Row 1: Counter + Memo -->
+<div class="grid">
+
+<section class="card" id="sec-counter">
+    <h2>1. Signal&lt;T&gt;</h2>
+    <p class="sub">The reactive primitive — set, read, update in place</p>
+    <div class="row">
+        <button id="inc">+1</button>
+        <span class="value" id="count-val">0</span>
+        <button id="dec">−1</button>
+        <button id="reset-counter">Reset</button>
+    </div>
+</section>
+
+<section class="card" id="sec-memo">
+    <h2>2. Memo&lt;T&gt;</h2>
+    <p class="sub">Auto-tracking computed values — change a source, result updates</p>
+    <div class="row">
+        <span class="val-label">a</span>
+        <button id="a-dec">−</button>
+        <span class="value-sm" id="a-val">0</span>
+        <button id="a-inc">+</button>
+    </div>
+    <div class="row">
+        <span class="val-label">b</span>
+        <button id="b-dec">−</button>
+        <span class="value-sm" id="b-val">0</span>
+        <button id="b-inc">+</button>
+    </div>
+    <div class="row">
+        <span>a + b = <strong class="value-sm" id="sum-val">0</strong></span>
+        <span style="margin-left:1rem">a × b = <strong class="value-sm" id="prod-val">0</strong></span>
+    </div>
+</section>
+
+</div>
+
+<!-- Row 2: Task Lifecycle -->
+<section class="card full" id="sec-tasks">
+    <h2>3. TaskScope — Structured Concurrency</h2>
+    <p class="sub">Spawn async tasks, cancel individually or all at once. Dropping the scope cancels everything.</p>
+    <div class="row">
+        <button class="accent" id="spawn-task">Spawn Task</button>
+        <button class="accent" id="spawn-3">Spawn 3</button>
+        <button id="cancel-last">Cancel Last</button>
+        <button class="danger" id="cancel-all">Cancel All</button>
+        <span style="margin-left:0.5rem;color:var(--dim);font-size:0.85rem">
+            Active: <strong id="active-count" style="color:var(--green)">0</strong>
+        </span>
+    </div>
+    <div id="task-list"></div>
+</section>
+
+<!-- Row 3: Batch vs Sequential -->
+<section class="card full" id="sec-batch">
+    <h2>4. Batch Updates</h2>
+    <p class="sub"><code>batch(|| {…})</code> groups multiple <code>set</code> calls — 3 signals × 1 batch = 1 notification instead of 3</p>
+    <div class="row">
+        <span class="val-label">x</span><span class="value-sm" id="bx-val">0</span>
+        <span class="val-label" style="margin-left:1rem">y</span><span class="value-sm" id="by-val">0</span>
+        <span class="val-label" style="margin-left:1rem">z</span><span class="value-sm" id="bz-val">0</span>
+    </div>
+    <div class="row">
+        <button id="seq-update">Sequential (+3 notify)</button>
+        <button class="accent" id="batch-update">Batch (+1 notify)</button>
+        <button id="reset-batch">Reset</button>
+    </div>
+    <div style="margin-top:0.35rem;font-size:0.78rem;color:var(--dim)">
+        Each click sets x, y, z to +1. Without batch = 3 internal notifications. With batch = 1.
+    </div>
+    <div style="margin-top:0.35rem;font-size:0.85rem">
+        <span class="highlight-seq" style="margin-right:0.8rem">Sequential: <strong id="seq-count">0</strong></span>
+        <span class="highlight-batch">Batch: <strong id="batch-count">0</strong></span>
+    </div>
+</section>
+
+<!-- Event Log -->
+<section class="card full" style="margin-top:1rem">
+    <h2>Event Log</h2>
+    <p class="sub">Real-time log of signal changes, task spawns, and cancellations</p>
+    <div id="event-log"><div class="entry"><span class="ts">--:--:--</span>Ready.</div></div>
+</section>
+
+</main>
+
+<footer>
+    Auralis — <a href="https://github.com/chh-itt/auralis" target="_blank">github.com/chh-itt/auralis</a>
+    &nbsp;·&nbsp; MIT or Apache-2.0
+</footer>
+
+<script type="module">
+    import init from './pkg/auralis_wasm_counter.js';
+    init();
+</script>
 </body>
 </html>

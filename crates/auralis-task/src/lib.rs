@@ -54,7 +54,7 @@ pub use executor::{TestScheduleFlush, TestTimeSource};
 pub use scope::scope_debug_label;
 pub use scope::{
     clear_scope_registry, current_scope, find_scope, set_scope_store, with_current_scope,
-    CallbackHandle, ScopeStore, TaskScope,
+    CallbackHandle, JoinHandle, ScopeStore, TaskScope,
 };
 
 #[cfg(feature = "ssr-tokio")]
