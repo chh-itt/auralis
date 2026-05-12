@@ -398,6 +398,7 @@ impl JoinHandle {
     ///
     /// Returns `true` for handles created by spawning into an already-cancelled
     /// scope (they never had a real task).
+    #[must_use]
     pub fn is_finished(&self) -> bool {
         match self.task_id {
             Some(tid) => executor::is_task_finished(&self.executor, tid),
@@ -407,6 +408,7 @@ impl JoinHandle {
 
     /// Return the id of the wrapped task, or `None` if the handle was
     /// created by spawning into an already-cancelled scope.
+    #[must_use]
     pub fn task_id(&self) -> Option<TaskId> {
         self.task_id
     }
