@@ -235,7 +235,14 @@ impl<T> Signal<T> {
 
     /// Internal: notify all subscribers of the given signal state.
     /// Called from the deferred callback queue and from re-entrant
-    /// follow-up notifications.  Takes a fresh subscriber snapshot.
+    /// follow-up notifications.
+    ///
+    /// Unlike [`schedule_notification`](Self::schedule_notification) which
+    /// uses a snapshot taken at `set()`-time, this method takes a **fresh**
+    /// subscriber snapshot from the current subscriber list.  This is
+    /// intentional: a follow-up notification represents a *new* logical
+    /// change (from a re-entrant `set()` during the previous callback
+    /// round), so subscribers added during that round should be included.
     fn notify_signal_state(state_ref: &Rc<RefCell<SignalState<T>>>)
     where
         T: 'static,
@@ -618,8 +625,15 @@ impl<T: Clone + 'static, U, F: Fn(&T) -> U> SignalMap<T, U, F> {
     }
 
     /// Return a future that resolves with the mapped value on the next
-    /// source signal mutation.  Delegates to the underlying signal's
-    /// [`changed`](Signal::changed).
+    /// source signal mutation.
+    ///
+    /// Note that this reads the signal *after* [`changed`](Signal::changed)
+    /// resolves — if a second mutation occurs between the resolve and the
+    /// read, the returned value reflects the latest state (not necessarily
+    /// the value that triggered the wakeup).  This is a deliberate
+    /// trade-off: the caller always gets the freshest value.  If you need
+    /// the exact value that triggered the change, use
+    /// [`Signal::map_changed`](Signal::map_changed) instead.
     pub async fn changed(&self) -> U {
         self.source.changed().await;
         self.read()

@@ -545,20 +545,26 @@ impl TaskScope {
         priority: Priority,
         future: impl Future<Output = ()> + 'static,
     ) -> JoinHandle {
-        let inner = self.inner.borrow();
-        if inner.cancelled.get() {
+        // Extract fields before spawning so the Ref borrow is released.
+        // If the scheduler fires synchronously (e.g. TestScheduleFlush),
+        // the spawned task's future is polled immediately, and a nested
+        // spawn on the current scope would panic if `inner` were still
+        // borrowed.
+        let (cancelled, ex, scope_id) = {
+            let inner = self.inner.borrow();
+            (inner.cancelled.get(), Rc::clone(&inner.executor), inner.id)
+        };
+        if cancelled {
             return JoinHandle {
                 task_id: None,
-                executor: Rc::clone(&inner.executor),
+                executor: ex,
             };
         }
-        let ex = Rc::clone(&inner.executor);
         let task_id = executor::with_executor(&ex, || {
             with_current_scope(self, || {
-                executor::spawn_scoped_on(&ex, priority, inner.id, future)
+                executor::spawn_scoped_on(&ex, priority, scope_id, future)
             })
         });
-        drop(inner);
         self.inner.borrow_mut().task_ids.push(task_id);
         JoinHandle {
             task_id: Some(task_id),

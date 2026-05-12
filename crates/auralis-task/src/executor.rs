@@ -264,6 +264,12 @@ pub struct Executor {
     deferred_ops: Vec<DeferredOp>,
     /// Callbacks pushed by `Signal::set` via the schedule hook.
     /// Drained at the start of every flush before polling tasks.
+    ///
+    /// Unbounded by design — in a single-threaded Wasm context, a tight
+    /// loop of signal sets will block the UI thread anyway, so adding a
+    /// capacity limit wouldn't improve the situation.  SSR / multi-tenant
+    /// users should ensure that application code doesn't produce
+    /// unbounded signal churn within a single request.
     deferred_callbacks: Vec<Box<dyn FnOnce()>>,
     flush_scheduler: Option<Rc<dyn ScheduleFlush>>,
     time_source: Option<Rc<dyn TimeSource>>,
@@ -516,6 +522,17 @@ impl Executor {
     /// `task_id` so it gets polled on the next flush.
     pub(crate) fn schedule_timer(ex: &Rc<RefCell<Executor>>, deadline_ms: u64, task_id: TaskId) {
         let mut e = ex.borrow_mut();
+        // If this task already has a pending timer (e.g. previous SleepFuture
+        // was dropped via select!), clean up the old entry so the timer map
+        // doesn't accumulate stale deadlines.
+        let old_deadline = e
+            .tasks
+            .get(task_id as usize)
+            .and_then(Option::as_ref)
+            .map_or(0, |t| t.timer_deadline);
+        if old_deadline != 0 {
+            e.cleanup_timer(task_id, old_deadline);
+        }
         e.timers.entry(deadline_ms).or_default().push(task_id);
         // Set the reverse index so cancel_scope_tasks can find this entry.
         if let Some(Some(ref mut t)) = e.tasks.get_mut(task_id as usize) {
@@ -1006,6 +1023,11 @@ pub fn remove_panic_hook() {
 }
 
 /// Spawn a future on the global executor at low priority.
+///
+/// **Important:** [`init_flush_scheduler`] must be called before spawning
+/// any tasks.  Without a flush scheduler, spawned tasks will sit in the
+/// queue indefinitely because the executor has no way to schedule a flush
+/// cycle.
 pub fn spawn_global(future: impl Future<Output = ()> + 'static) {
     spawn_global_with_priority(Priority::Low, future);
 }
