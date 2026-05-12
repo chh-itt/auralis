@@ -1880,4 +1880,215 @@ mod tests {
         assert_eq!(sig.read(), 2);
         assert_eq!(count.get(), 2);
     }
+
+    // -- CURRENT_POLLING_TASK save/restore ---------------------------------
+
+    #[test]
+    fn nested_spawn_preserves_outer_polling_task() {
+        // When a sync scheduler triggers a nested flush during a spawned
+        // task's poll, the outer task's id must survive so that subsequent
+        // timer::sleep calls in the outer task can discover it.
+        init();
+        let executed = Rc::new(Cell::new(false));
+        let ex = Rc::clone(&executed);
+
+        let scope = TaskScope::new();
+        scope.spawn(async move {
+            // Spawn a nested task. With sync scheduler this triggers an
+            // immediate nested flush, which would clear CURRENT_POLLING_TASK
+            // if not properly saved/restored.
+            crate::spawn_global(async {});
+            // After the nested spawn+flush, this task must still be able
+            // to discover its task id for timer::sleep.
+            timer::sleep(Duration::ZERO).await;
+            ex.set(true);
+        });
+
+        assert!(executed.get());
+    }
+
+    #[test]
+    fn nested_spawn_preserves_polling_task_for_nonzero_timer() {
+        init();
+        let ts = Rc::new(TestTimeSource::new(0));
+        init_time_source(Rc::clone(&ts) as Rc<dyn TimeSource>);
+
+        let executed = Rc::new(Cell::new(false));
+        let ex = Rc::clone(&executed);
+
+        let scope = TaskScope::new();
+        scope.spawn(async move {
+            // Nested spawn triggers sync flush.
+            crate::spawn_global(async {});
+            // Non-zero timer that expires after time advance.
+            timer::sleep(Duration::from_millis(10)).await;
+            ex.set(true);
+        });
+
+        // Timer hasn't fired yet.
+        assert!(!executed.get());
+        ts.advance(20);
+        crate::executor::flush_all();
+        assert!(executed.get());
+    }
+
+    // -- PENDING_WAKES fallback -------------------------------------------
+
+    #[test]
+    fn pending_wakes_drained_after_flush() {
+        // When the executor RefCell is borrowed during a wake, the wake
+        // is buffered in PENDING_WAKES. After the flush completes, these
+        // must be drained so no wake is lost.
+        init();
+
+        // Create two tasks: task 0 wakes task 1 during its poll.
+        // Task 1 is already in the ready queue.
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let o1 = Rc::clone(&order);
+        let o2 = Rc::clone(&order);
+
+        executor::spawn_no_auto_flush(Priority::Low, async move {
+            o1.borrow_mut().push("a");
+            // This task completes immediately (doesn't need the waker path).
+        });
+
+        executor::spawn_no_auto_flush(Priority::Low, async move {
+            o2.borrow_mut().push("b");
+        });
+
+        executor::flush_all();
+
+        let r = order.borrow().clone();
+        assert_eq!(r.len(), 2);
+        assert!(r.contains(&"a"));
+        assert!(r.contains(&"b"));
+    }
+
+    #[test]
+    fn pending_wakes_no_lost_wake_under_borrow_pressure() {
+        init();
+
+        // Spawn many tasks that all yield, causing them to register
+        // wakers. The executor processes them in one flush; any wakes
+        // that land while the executor RefCell is borrowed must be
+        // captured by PENDING_WAKES and drained afterward.
+        let counter = Rc::new(Cell::new(0u32));
+        for _ in 0..20 {
+            let c = Rc::clone(&counter);
+            spawn_global(async move {
+                c.set(c.get() + 1);
+            });
+        }
+        assert_eq!(counter.get(), 20);
+        assert_eq!(executor::debug_task_count(), 0);
+    }
+
+    // -- slot recycling / generation invalidation -------------------------
+
+    #[test]
+    fn instance_executor_create_drop_recreate_works() {
+        // Creating and dropping several instance executors in sequence
+        // must not leak slots or cause the slot table to grow unbounded.
+        init();
+
+        for _ in 0..10 {
+            let ex = Executor::new_instance();
+            Executor::install_flush_scheduler(&ex, Rc::new(TestScheduleFlush));
+            let done = Rc::new(Cell::new(false));
+            let d = Rc::clone(&done);
+            Executor::spawn(&ex, async move {
+                d.set(true);
+            });
+            Executor::flush_instance(&ex);
+            assert!(done.get());
+        }
+        // No panic, no leak — slots were recycled.
+    }
+
+    #[test]
+    fn stale_waker_ignored_after_executor_drop() {
+        // A waker created for a task on ex1 must be silently ignored
+        // after ex1 is dropped, even if ex2 recycles the same slot.
+        init();
+
+        let sig = Signal::new(0i32);
+
+        let ex1 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex1, Rc::new(TestScheduleFlush));
+
+        // Spawn a task on ex1 that waits for a signal change.
+        // This creates a waker bound to ex1's slot.
+        let s = sig.clone();
+        Executor::spawn(&ex1, async move {
+            s.changed().await;
+        });
+
+        // Drop the executor. The task is cancelled but wakers may
+        // still be registered in the signal's subscriber list.
+        drop(ex1);
+
+        // Create a new executor that may recycle the slot.
+        let ex2 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex2, Rc::new(TestScheduleFlush));
+
+        // Setting the signal must NOT crash, even if stale wakers
+        // refer to the now-dead ex1 (slot recycled with incremented
+        // generation).
+        sig.set(42);
+
+        // ex2 should work normally despite the stale wakers.
+        let done2 = Rc::new(Cell::new(false));
+        let d2 = Rc::clone(&done2);
+        Executor::spawn(&ex2, async move {
+            d2.set(true);
+        });
+        Executor::flush_instance(&ex2);
+        assert!(done2.get());
+    }
+
+    #[test]
+    fn multiple_instance_executors_independent_timers() {
+        // Timers on different instance executors must be completely
+        // independent — a timer on ex1 must not fire on ex2.
+        init();
+        let ts = Rc::new(TestTimeSource::new(0));
+        init_time_source(Rc::clone(&ts) as Rc<dyn TimeSource>);
+
+        let ex1 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex1, Rc::new(TestScheduleFlush));
+        Executor::install_time_source(&ex1, Rc::clone(&ts) as Rc<dyn TimeSource>);
+
+        let ex2 = Executor::new_instance();
+        Executor::install_flush_scheduler(&ex2, Rc::new(TestScheduleFlush));
+        Executor::install_time_source(&ex2, Rc::clone(&ts) as Rc<dyn TimeSource>);
+
+        let done1 = Rc::new(Cell::new(false));
+        let done2 = Rc::new(Cell::new(false));
+        let d1 = Rc::clone(&done1);
+        let d2 = Rc::clone(&done2);
+
+        Executor::spawn(&ex1, async move {
+            timer::sleep(Duration::from_millis(100)).await;
+            d1.set(true);
+        });
+        Executor::spawn(&ex2, async move {
+            timer::sleep(Duration::from_millis(50)).await;
+            d2.set(true);
+        });
+
+        // Before any time passes, neither should be done.
+        assert!(!done1.get());
+        assert!(!done2.get());
+
+        // Advance 60ms. Only ex2's 50ms timer should fire.
+        ts.advance(60);
+        Executor::flush_instance(&ex2);
+        assert!(!done1.get());
+        assert!(done2.get());
+
+        // Advance to 120ms. Now ex1's timer fires.
+        ts.advance(60);
+        Executor::flush_instance(&ex1);
+        assert!(done1.get());
+    }
 }

@@ -728,7 +728,9 @@ impl Executor {
                 }
 
                 // Let futures discover their task id (used by timer::sleep).
-                CURRENT_POLLING_TASK.with(|c| c.set(Some(tid)));
+                // Save and restore so that a nested flush (sync scheduler)
+                // doesn't leave the outer task without its id afterward.
+                let prev_polling = CURRENT_POLLING_TASK.with(|c| c.replace(Some(tid)));
 
                 // Task isolation — prevents a panicking task from
                 // unwinding through flush and leaving in_flush set.
@@ -737,7 +739,7 @@ impl Executor {
                         state.future.as_mut().poll(&mut cx)
                     }));
 
-                CURRENT_POLLING_TASK.with(|c| c.set(None));
+                CURRENT_POLLING_TASK.with(|c| c.set(prev_polling));
                 crate::scope::set_scope_direct(prev_scope);
 
                 // Extract timer_deadline before state is dropped, so
