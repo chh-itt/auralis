@@ -1932,24 +1932,20 @@ mod tests {
         assert!(executed.get());
     }
 
-    // -- PENDING_WAKES fallback -------------------------------------------
+    // -- batch spawn + flush -----------------------------------------------
 
     #[test]
-    fn pending_wakes_drained_after_flush() {
-        // When the executor RefCell is borrowed during a wake, the wake
-        // is buffered in PENDING_WAKES. After the flush completes, these
-        // must be drained so no wake is lost.
+    fn batch_spawn_with_no_auto_flush_then_manual_flush() {
+        // Sanity-check: spawn_no_auto_flush defers execution until
+        // flush_all is called.  Both tasks must complete.
         init();
 
-        // Create two tasks: task 0 wakes task 1 during its poll.
-        // Task 1 is already in the ready queue.
         let order = Rc::new(RefCell::new(Vec::new()));
         let o1 = Rc::clone(&order);
         let o2 = Rc::clone(&order);
 
         executor::spawn_no_auto_flush(Priority::Low, async move {
             o1.borrow_mut().push("a");
-            // This task completes immediately (doesn't need the waker path).
         });
 
         executor::spawn_no_auto_flush(Priority::Low, async move {
@@ -1965,13 +1961,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_wakes_no_lost_wake_under_borrow_pressure() {
+    fn spawn_many_tasks_all_complete() {
+        // Spawn many tasks that each increment a counter.  With a
+        // synchronous scheduler they run to completion immediately.
         init();
 
-        // Spawn many tasks that all yield, causing them to register
-        // wakers. The executor processes them in one flush; any wakes
-        // that land while the executor RefCell is borrowed must be
-        // captured by PENDING_WAKES and drained afterward.
         let counter = Rc::new(Cell::new(0u32));
         for _ in 0..20 {
             let c = Rc::clone(&counter);
@@ -1983,7 +1977,7 @@ mod tests {
         assert_eq!(executor::debug_task_count(), 0);
     }
 
-    // -- slot recycling / generation invalidation -------------------------
+    // -- instance executor lifecycle --------------------------------------
 
     #[test]
     fn instance_executor_create_drop_recreate_works() {
@@ -2006,9 +2000,11 @@ mod tests {
     }
 
     #[test]
-    fn stale_waker_ignored_after_executor_drop() {
-        // A waker created for a task on ex1 must be silently ignored
-        // after ex1 is dropped, even if ex2 recycles the same slot.
+    fn executor_drop_recreate_signal_subscriptions_cleaned_up() {
+        // When an executor is dropped, all tasks are cancelled and their
+        // signal subscriptions (SignalChangedFuture Drop) are cleaned up.
+        // Setting the signal afterward must not crash, and a new executor
+        // that recycles the slot must work normally.
         init();
 
         let sig = Signal::new(0i32);

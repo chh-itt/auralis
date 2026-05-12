@@ -339,6 +339,12 @@ impl Executor {
         id
     }
 
+    /// Release a task slot back to the free list.
+    ///
+    /// **Caller must ensure** that `task_id` has not already been freed
+    /// (e.g. via [`cancel_task`] or [`cancel_scope_tasks_on`]).  This
+    /// method unconditionally pushes to `free_slots` — pushing the same
+    /// id twice would cause [`allocate_id`] to hand it out twice.
     fn free_slot(&mut self, task_id: TaskId) {
         // Clean up any pending timer for this task so a recycled
         // task ID is not spuriously woken by an old deadline.

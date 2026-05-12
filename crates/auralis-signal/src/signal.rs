@@ -572,6 +572,12 @@ impl<T> Clone for Signal<T> {
     }
 }
 
+/// Formats the signal for debugging, showing the current value,
+/// version, and subscriber count.
+///
+/// **Panics** if `T`'s [`Debug`] implementation calls [`set`](Signal::set)
+/// (or any method that borrows `self` mutably) on the same signal,
+/// because the formatter already holds an immutable [`RefCell`] borrow.
 impl<T: fmt::Debug> fmt::Debug for Signal<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.borrow();
