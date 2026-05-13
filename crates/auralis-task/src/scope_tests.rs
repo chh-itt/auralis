@@ -39,7 +39,10 @@
 
 use super::*;
 use crate::executor::{self, init_flush_scheduler, reset_executor_for_test, TestScheduleFlush};
-use crate::{init_time_source, ScheduleFlush, TestTimeSource, TimeSource};
+use crate::{
+    init_time_source, schedule_callback, set_global_max_deferred_callbacks, ScheduleFlush,
+    TestTimeSource, TimeSource,
+};
 use auralis_signal::Signal;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -1483,4 +1486,44 @@ fn priority_low_not_permanently_starved() {
 
     executor::flush_all();
     assert!(low_ran.get(), "low priority task should eventually execute");
+}
+
+// -- deferred callback limit ----------------------------------------------
+
+#[test]
+#[should_panic(expected = "deferred callback limit exceeded")]
+fn max_deferred_callbacks_limit_panics_when_exceeded() {
+    init();
+    set_global_max_deferred_callbacks(Some(3));
+
+    // Push 4 callbacks — the 4th should panic.
+    // With TestScheduleFlush, flush runs inside schedule_callback and
+    // drains the queue, so we need to prevent the flush from draining.
+    // schedule_callback itself doesn't trigger a recursive drain —
+    // it enqueues and schedules a future flush.
+    // But TestScheduleFlush calls the flush callback immediately, which
+    // drains the queue, so we never accumulate more than 1 callback.
+    // Use a NoopScheduleFlush instead.
+
+    // Clear and replace with no-op scheduler.
+    reset_executor_for_test();
+    let schedule_count = Rc::new(Cell::new(0u32));
+    struct NoopSched(Rc<Cell<u32>>);
+    impl ScheduleFlush for NoopSched {
+        fn schedule(&self, _callback: Box<dyn FnOnce()>) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let sched: Rc<dyn ScheduleFlush> = Rc::new(NoopSched(Rc::clone(&schedule_count)));
+    init_flush_scheduler(sched);
+    set_global_max_deferred_callbacks(Some(3));
+
+    // Push 3 callbacks — should succeed.
+    schedule_callback(Box::new(|| {}));
+    schedule_callback(Box::new(|| {}));
+    schedule_callback(Box::new(|| {}));
+    assert_eq!(schedule_count.get(), 1); // only first one triggers schedule
+
+    // The 4th should panic.
+    schedule_callback(Box::new(|| {}));
 }

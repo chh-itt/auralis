@@ -276,6 +276,13 @@ pub struct Executor {
     /// Maximum milliseconds to spend inside a single flush before
     /// yielding back to the host event loop.  Default: 8 ms.
     time_budget_ms: u64,
+    /// Optional cap on the number of deferred signal callbacks that can
+    /// accumulate between two flushes.  Exceeding this limit triggers a
+    /// panic — useful as a safety net in SSR / multi-tenant deployments
+    /// where a runaway signal loop could OOM the process.
+    ///
+    /// Default: `None` (no limit).
+    max_deferred_callbacks: Option<usize>,
     /// Optional hook invoked when a spawned task panics.
     panic_hook: Option<Rc<dyn Fn(PanicInfo)>>,
     /// Timer queue: map from deadline (ms) to task ids that should be
@@ -321,6 +328,7 @@ impl Executor {
             flush_scheduler: None,
             time_source: None,
             time_budget_ms: 8,
+            max_deferred_callbacks: None,
             panic_hook: None,
             timers: BTreeMap::new(),
             slot_id: 0,
@@ -505,6 +513,20 @@ impl Executor {
     /// yielding (flush runs to completion).
     pub fn set_time_budget(ex: &Rc<RefCell<Executor>>, budget_ms: u64) {
         ex.borrow_mut().time_budget_ms = budget_ms;
+    }
+
+    /// Set a safety cap on the deferred signal callback queue.
+    ///
+    /// When set to `Some(n)`, the executor will panic if more than `n`
+    /// deferred callbacks accumulate between two flush cycles.  This is a
+    /// safety net for SSR / multi-tenant servers where a runaway signal
+    /// loop could exhaust memory — in a single-threaded Wasm context,
+    /// unbounded accumulation is acceptable because it blocks the UI
+    /// thread anyway.
+    ///
+    /// Default: `None` (no limit).
+    pub fn set_max_deferred_callbacks(ex: &Rc<RefCell<Executor>>, limit: Option<usize>) {
+        ex.borrow_mut().max_deferred_callbacks = limit;
     }
 
     /// Register a callback invoked whenever a spawned task panics.
@@ -948,8 +970,33 @@ fn flush() {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Check the deferred callback limit before pushing.
+fn check_callback_limit(ex: &Executor) {
+    if let Some(limit) = ex.max_deferred_callbacks {
+        assert!(
+            ex.deferred_callbacks.len() < limit,
+            "deferred callback limit exceeded ({limit}). \
+             This usually indicates an unbounded signal-set loop. \
+             Increase the limit via set_max_deferred_callbacks() \
+             or disable it with None."
+        );
+    }
+}
+
 /// Set the platform flush scheduler and install the signal deferred-
-/// callback hook (idempotent — subsequent calls are no-ops for the hook).
+/// callback hook.
+///
+/// Idempotent — subsequent calls are no-ops (the hook is installed via
+/// [`std::sync::OnceLock`], so it fires exactly once per process).
+///
+/// # Threading constraint
+///
+/// The hook is **per-process** and routes signal notifications to the
+/// executor that is "current" when the notification fires (see
+/// [`with_executor`]).  For single-threaded use (Wasm, CLI) this is
+/// transparent.  For multi-threaded SSR, enable the `ssr-tokio` feature
+/// and call [`init_scope_store_tokio`](crate::init_scope_store_tokio).
+/// See [`with_executor`] for the full routing contract.
 pub fn init_flush_scheduler(sched: Rc<dyn ScheduleFlush>) {
     EXECUTOR.with(|exec| exec.borrow_mut().flush_scheduler = Some(sched));
     install_signal_hook_once();
@@ -969,6 +1016,7 @@ fn install_signal_hook_once() {
             if let Some(ex) = current_executor() {
                 let maybe_sched = {
                     let mut e = ex.borrow_mut();
+                    check_callback_limit(&e);
                     e.deferred_callbacks.push(cb);
                     if e.in_flush {
                         None
@@ -984,6 +1032,7 @@ fn install_signal_hook_once() {
                 EXECUTOR.with(|exec| {
                     let maybe_sched = {
                         let mut ex = exec.borrow_mut();
+                        check_callback_limit(&ex);
                         ex.deferred_callbacks.push(cb);
                         if ex.in_flush {
                             None
@@ -1014,6 +1063,13 @@ pub fn init_time_source(ts: Rc<dyn TimeSource>) {
 /// See [`Executor::set_time_budget`] for details.
 pub fn set_global_time_budget(budget_ms: u64) {
     EXECUTOR.with(|exec| exec.borrow_mut().time_budget_ms = budget_ms);
+}
+
+/// Set the deferred callback safety cap on the global executor.
+///
+/// See [`Executor::set_max_deferred_callbacks`] for details.
+pub fn set_global_max_deferred_callbacks(limit: Option<usize>) {
+    EXECUTOR.with(|exec| exec.borrow_mut().max_deferred_callbacks = limit);
 }
 
 /// Register a global panic hook called when any globally-spawned
@@ -1133,7 +1189,6 @@ pub(crate) fn cancel_scope_tasks_on(
     }
 
     // Cancel each task by id (direct lookup, no full-table scan).
-    // Cancel each task by id (direct lookup, no full-table scan).
     // Only push to free_slots for slots we actually took.
     for &tid in task_ids {
         let idx = tid as usize;
@@ -1248,6 +1303,7 @@ pub fn schedule_callback(f: Box<dyn FnOnce()>) {
     let exec = current_executor_instance();
     let maybe_sched = {
         let mut ex = exec.borrow_mut();
+        check_callback_limit(&ex);
         ex.deferred_callbacks.push(f);
         if ex.in_flush {
             None
@@ -1297,6 +1353,14 @@ pub fn set_deferred<T: 'static>(signal: &Signal<T>, value: T) {
 /// Clears all task slots, queues, deferred ops, flush/scheduler flags,
 /// and injected [`ScheduleFlush`]/[`TimeSource`].  Call at the start
 /// of every test to prevent cross-test state leakage.
+///
+/// Note that the signal schedule hook (installed by
+/// [`init_flush_scheduler`] via [`std::sync::OnceLock`]) **persists**
+/// across resets — the hook references the global [`EXECUTOR`]
+/// thread-local, and this function re-initialises that same executor
+/// in place rather than replacing it.  This is correct behaviour:
+/// after reset, signal notifications route to the freshly-cleared
+/// global executor.
 ///
 /// # Safety / usage
 ///
