@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "auralis-tokio-ssr"
+version = "0.1.0"
+edition = "2021"
+description = "Tokio SSR demo — multi-request isolation with Auralis + Tokio"
+
+[dependencies]
+auralis-signal = { path = "../../crates/auralis-signal" }
+auralis-task = { path = "../../crates/auralis-task", features = ["ssr-tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

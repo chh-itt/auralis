@@ -136,6 +136,43 @@ Enable the `ssr-tokio` feature for per-task scope storage.
 See `crates/auralis-task/examples/multi_thread_bridge.rs` for more patterns
 (multiple producers, oneshot results).
 
+## Tokio Integration
+
+Auralis is runtime-agnostic, but pairs naturally with Tokio for SSR.
+**Tokio handles I/O** (network, DB, timers) and feeds results into signals.
+**Auralis handles the reactive cascade** — signals → memos → effects →
+rendered output.  The boundary is a single `signal.set()`.
+
+```rust
+use auralis_signal::Signal;
+use auralis_task::{Executor, TaskScope, with_executor};
+
+// Per-request: Tokio fetches data, Auralis renders.
+let ex = Executor::new_instance();
+let scope = TaskScope::with_executor(&ex);
+let data = Signal::new(None::<Json>);
+
+// Reactive effect: re-render on every data change.
+scope.spawn(async move {
+    loop { data.changed().await; render(data.read()); }
+});
+
+// Tokio I/O → signal → reactive cascade →
+// Executor::flush_instance(&ex) → output ready.
+let json = reqwest::get(url).await?.json().await?;
+with_executor(&ex, || data.set(Some(json)));
+Executor::flush_instance(&ex);
+
+// Drop scope → all reactive state cleaned up. No manual tokens.
+drop(scope);
+```
+
+For per-task scope storage with Tokio (required for `current_scope()`
+inside spawned tasks), enable the `ssr-tokio` feature and call
+`init_scope_store_tokio()` once at startup.
+
+See `demos/tokio-ssr/` for a runnable demo with concurrent requests.
+
 ## Workspace Structure
 
 ```

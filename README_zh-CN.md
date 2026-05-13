@@ -133,6 +133,43 @@ assert_eq!(sig.read(), 42);
 更多模式（多生产者、oneshot）见
 `crates/auralis-task/examples/multi_thread_bridge.rs`。
 
+## Tokio 集成
+
+Auralis 不绑定运行时，但与 Tokio 天然互补。
+**Tokio 负责 I/O**（网络、DB、定时器），将结果写入 signal。
+**Auralis 负责响应式级联**——signal → memo → effect → 渲染输出。
+边界仅是一行 `signal.set()`。
+
+```rust
+use auralis_signal::Signal;
+use auralis_task::{Executor, TaskScope, with_executor};
+
+// 每个请求：Tokio 取数据，Auralis 驱动渲染
+let ex = Executor::new_instance();
+let scope = TaskScope::with_executor(&ex);
+let data = Signal::new(None::<Json>);
+
+// 响应式效果：数据一变就重新渲染
+scope.spawn(async move {
+    loop { data.changed().await; render(data.read()); }
+});
+
+// Tokio I/O → signal → 响应式级联 →
+// Executor::flush_instance(&ex) → 输出就绪
+let json = reqwest::get(url).await?.json().await?;
+with_executor(&ex, || data.set(Some(json)));
+Executor::flush_instance(&ex);
+
+// Drop scope → 所有响应式状态自动清理，无需手动 token
+drop(scope);
+```
+
+需要 per-task scope 存储时（例如 `current_scope()` 在 tokio task 中
+可用），启用 `ssr-tokio` feature 并在启动时调用
+`init_scope_store_tokio()`。
+
+完整可运行示例见 `demos/tokio-ssr/`。
+
 ## 目录结构
 
 ```
