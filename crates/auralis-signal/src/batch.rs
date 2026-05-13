@@ -3,6 +3,30 @@
 //! When [`batch`] is active, signal notifications are queued rather than
 //! pushed to the executor immediately.  The outermost batch flushes them
 //! all at once on exit (including on panic, via [`BatchGuard`]).
+//!
+//! # Explicit, not automatic
+//!
+//! Auralis uses **explicit** batching — callers must wrap a group of
+//! `set()` calls in [`batch(|| ...)`](batch).  There is no implicit
+//! per-microtask or per-frame auto-batch.  This is a deliberate choice:
+//!
+//! - In a single-threaded Wasm or game-loop context the host controls
+//!   when a "frame" begins and ends — Auralis can't know your frame
+//!   boundary.  Calling `batch()` at the top of your update loop is a
+//!   one-liner.
+//! - Explicit batching avoids the surprise of "why didn't my signal
+//!   update propagate?" that implicit auto-batch systems can cause.
+//!
+//! If you prefer implicit batching, wrap your frame loop:
+//!
+//! ```ignore
+//! fn on_frame() {
+//!     batch(|| {
+//!         // all signal sets in this frame are coalesced
+//!         update_ui();
+//!     });
+//! }
+//! ```
 
 use std::cell::{Cell, RefCell};
 

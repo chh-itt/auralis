@@ -509,8 +509,21 @@ impl Executor {
     /// Set the maximum time (in milliseconds) a single flush may spend
     /// before yielding back to the host event loop.
     ///
-    /// The default is 8 ms.  Set to `u64::MAX` to disable time-budget
-    /// yielding (flush runs to completion).
+    /// The default is 8 ms (~120 fps frame budget, leaving time for the
+    /// browser to render between flushes).  Set to `u64::MAX` to disable
+    /// time-budget yielding (flush runs to completion).
+    ///
+    /// # Semantics
+    ///
+    /// The budget is checked **between** task polls — the currently
+    /// executing task is never interrupted.  When the budget is exhausted
+    /// the executor sets `in_flush = false` and schedules a follow-up
+    /// flush so the remaining ready tasks will be polled on the next
+    /// microtask tick.  This is cooperative (`.await`-bound) yielding,
+    /// not preemptive.
+    ///
+    /// This affects **this executor only**.  For the global thread-local
+    /// executor use [`set_global_time_budget`].
     pub fn set_time_budget(ex: &Rc<RefCell<Executor>>, budget_ms: u64) {
         ex.borrow_mut().time_budget_ms = budget_ms;
     }
@@ -1058,9 +1071,13 @@ pub fn init_time_source(ts: Rc<dyn TimeSource>) {
     EXECUTOR.with(|exec| exec.borrow_mut().time_source = Some(ts));
 }
 
-/// Set the per-flush time budget on the global executor.
+/// Set the per-flush time budget on the **global** thread-local executor.
 ///
-/// See [`Executor::set_time_budget`] for details.
+/// This does **not** affect instance executors created via
+/// [`Executor::new_instance`] — those carry their own budget (default
+/// 8 ms) and must be configured via [`Executor::set_time_budget`].
+///
+/// See [`Executor::set_time_budget`] for the full semantics.
 pub fn set_global_time_budget(budget_ms: u64) {
     EXECUTOR.with(|exec| exec.borrow_mut().time_budget_ms = budget_ms);
 }

@@ -109,6 +109,33 @@ No manual cancel tokens, no "effect system." Just async Rust.
 - **`watch` / `watch_effect`** — auto-tracking side effects
 - **Panic-safe cleanup** — `CallbackHandle::drop` is `catch_unwind`-isolated
 
+## Multi-threading
+
+`Signal<T>` and `TaskScope` are `!Send + !Sync` by design — they live on the
+executor thread.  For cross-thread communication, bridge via a standard
+channel: the worker thread owns the `Sender` (which *is* `Send`), and the
+host thread drains the `Receiver` into `sig.set()`.
+
+```rust
+use std::sync::mpsc;
+use std::thread;
+
+let sig = Signal::new(0i32);
+let (tx, rx) = mpsc::channel();
+
+thread::spawn(move || { tx.send(42).unwrap(); });
+
+for msg in rx { sig.set(msg); }
+assert_eq!(sig.read(), 42);
+```
+
+For multi-request SSR isolation (Tokio), each request gets its own
+`Executor::new_instance()` + `TaskScope`, wrapped via `with_executor`.
+Enable the `ssr-tokio` feature for per-task scope storage.
+
+See `crates/auralis-task/examples/multi_thread_bridge.rs` for more patterns
+(multiple producers, oneshot results).
+
 ## Workspace Structure
 
 ```

@@ -599,7 +599,13 @@ impl<T: Default> Default for Signal<T> {
 // SignalMap — lightweight read-only projection
 // ---------------------------------------------------------------------------
 
-/// A lightweight read-only projection of a [`Signal`].
+/// A lightweight **unidirectional** read-only projection of a [`Signal`].
+///
+/// `SignalMap` propagates source changes to the mapped value but does
+/// **not** write back — setting the source signal is the only way to
+/// change the mapped value.  This is intentional: mapping functions
+/// are often non-invertible (e.g. `|v| v.len()`), so automatic
+/// bidirectional binding would be incorrect in the general case.
 ///
 /// Unlike [`Memo`](crate::Memo), `SignalMap` does **not** track
 /// dependencies or cache the result — it simply applies the mapping

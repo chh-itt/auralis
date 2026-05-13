@@ -107,6 +107,32 @@ drop(scope); // 取消所有已 spawn 的任务 + 运行清理
 - **`watch` / `watch_effect`**——自动追踪副作用
 - **Panic 安全清理**——`CallbackHandle::drop` 由 `catch_unwind` 隔离
 
+## 多线程
+
+`Signal<T>` 和 `TaskScope` 被设计为 `!Send + !Sync`——它们运行在
+executor 线程上。跨线程通信通过标准通道桥接：工作线程持有 `Sender`
+（`Send` 类型），宿主线程将 `Receiver` 的消息灌入 `sig.set()`。
+
+```rust
+use std::sync::mpsc;
+use std::thread;
+
+let sig = Signal::new(0i32);
+let (tx, rx) = mpsc::channel();
+
+thread::spawn(move || { tx.send(42).unwrap(); });
+
+for msg in rx { sig.set(msg); }
+assert_eq!(sig.read(), 42);
+```
+
+对于多请求 SSR 隔离（Tokio），每个请求使用独立的
+`Executor::new_instance()` + `TaskScope`，通过 `with_executor` 包裹。
+启用 `ssr-tokio` feature 即可获得 per-task scope 存储。
+
+更多模式（多生产者、oneshot）见
+`crates/auralis-task/examples/multi_thread_bridge.rs`。
+
 ## 目录结构
 
 ```
