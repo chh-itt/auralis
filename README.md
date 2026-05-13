@@ -91,6 +91,28 @@ Auralis reduces it to things Rust programmers already know:
 
 No manual cancel tokens, no "effect system." Just async Rust.
 
+## Design bet
+
+Auralis is **10× smaller, not 10× more powerful.** It sacrifices three things
+that full reactive frameworks need:
+
+- **No reactive graph.** Each signal has a flat subscriber list and a
+  monotonic version number. No topological propagation, no Clean/Check/Dirty
+  state machine. The tradeoff: two effects reading the same dirty memo
+  might each trigger recomputation.
+- **No arena allocation.** `Rc<RefCell<>>` uniformly. No `Copy` signals, no
+  arena lifetimes. The tradeoff: reference-counting overhead on every read
+  and clone.
+- **No multi-threaded storage backend.** Single-threaded by design
+  (`!Send + !Sync`). For multi-threaded SSR, spin up isolated executors
+  per request.
+
+What you get: ~1,400 lines of implementation across two crates, zero
+dependencies for the signal layer, `#![forbid(unsafe_code)]`. The entire
+reactive layer fits in your head after one coffee. If you need to debug
+why an effect didn't fire, you step through a flat subscriber list, not
+a graph.
+
 ## Key Properties
 
 - **`#![forbid(unsafe_code)]`** in both crates — zero unsafe

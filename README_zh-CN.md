@@ -89,6 +89,23 @@ drop(scope); // 取消所有已 spawn 的任务 + 运行清理
 
 不需要手动 cancel token，不需要"effect 系统"。纯异步 Rust。
 
+## 设计取舍
+
+Auralis 的赌注是 **"小 10 倍"，而不是"强大 10 倍"**。它刻意牺牲了三样东西：
+
+- **无响应式图。** 每个 signal 持有一个平坦的订阅列表和单调版本号。没有拓扑传播，
+  没有 Clean/Check/Dirty 状态机。代价：两个 effect 同读一个脏 Memo 可能各自
+  触发一次重算。
+- **无 Arena 分配。** 统一使用 `Rc<RefCell<>>`。没有 `Copy` 类型的 signal，
+  没有 arena 生命周期。代价：每次读写有引用计数开销。
+- **无多线程存储后端。** 设计为单线程（`!Send + !Sync`）。多线程 SSR 通过
+  独立 executor 实例隔离。代价：不能直接跨线程共享 signal。
+
+换来的是：两个 crate 总共约 1,400 行实现代码，信号层零依赖，
+`#![forbid(unsafe_code)]`。整个响应式层一杯咖啡的时间就能读完。
+如果你需要 debug 一个 effect 为什么不触发——你追踪的是一个平坦订阅列表，
+而非一张图。
+
 ## 核心特性
 
 - **`#![forbid(unsafe_code)]`**——两个 crate 均零 unsafe
