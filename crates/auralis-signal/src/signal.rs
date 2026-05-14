@@ -127,6 +127,60 @@ pub(crate) struct SignalState<T> {
 /// ```
 pub struct Signal<T> {
     pub(crate) state: Rc<RefCell<SignalState<T>>>,
+    label: Rc<RefCell<Option<String>>>,
+}
+
+// Without the diagnostics feature, Signal::new has no 'static bound.
+#[cfg(not(feature = "diagnostics"))]
+impl<T> Signal<T> {
+    /// Create a new signal with the given initial value.
+    ///
+    /// The initial version is 0.
+    #[must_use]
+    pub fn new(val: T) -> Self {
+        let state = Rc::new(RefCell::new(SignalState {
+            value: val,
+            version: 0,
+            next_subscriber_id: 0,
+            subscribers: Vec::new(),
+            dirty: false,
+            notifying: false,
+        }));
+        Self {
+            state,
+            label: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+// With the diagnostics feature, registration requires T: 'static.
+#[cfg(feature = "diagnostics")]
+impl<T: 'static> Signal<T> {
+    /// Create a new signal with the given initial value.
+    ///
+    /// The initial version is 0.
+    #[must_use]
+    pub fn new(val: T) -> Self {
+        let state = Rc::new(RefCell::new(SignalState {
+            value: val,
+            version: 0,
+            next_subscriber_id: 0,
+            subscribers: Vec::new(),
+            dirty: false,
+            notifying: false,
+        }));
+        let label = Rc::new(RefCell::new(None));
+
+        let weak = Rc::downgrade(&state);
+        let addr = Rc::as_ptr(&state) as usize;
+        crate::registry::register(crate::registry::make_signal_callback(
+            weak,
+            Rc::clone(&label),
+            addr,
+        ));
+
+        Self { state, label }
+    }
 }
 
 impl<T> Signal<T> {
@@ -139,23 +193,6 @@ impl<T> Signal<T> {
     /// another thread, so the address is a stable identity).
     pub(crate) fn state_addr(&self) -> usize {
         Rc::as_ptr(&self.state) as usize
-    }
-
-    /// Create a new signal with the given initial value.
-    ///
-    /// The initial version is 0.
-    #[must_use]
-    pub fn new(val: T) -> Self {
-        Self {
-            state: Rc::new(RefCell::new(SignalState {
-                value: val,
-                version: 0,
-                next_subscriber_id: 0,
-                subscribers: Vec::new(),
-                dirty: false,
-                notifying: false,
-            })),
-        }
     }
 
     /// Return a clone of the current value.
@@ -523,6 +560,31 @@ impl<T> Signal<T> {
         self.state.borrow().subscribers.len()
     }
 
+    /// Set a human-readable label for this signal.
+    ///
+    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
+    /// output and are useful for debugging.  Multiple signals can share
+    /// the same label.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use auralis_signal::Signal;
+    ///
+    /// let sig = Signal::new(0);
+    /// sig.set_label("counter");
+    /// assert_eq!(sig.label(), Some("counter".to_string()));
+    /// ```
+    pub fn set_label(&self, label: impl Into<String>) {
+        *self.label.borrow_mut() = Some(label.into());
+    }
+
+    /// Return the label set by [`set_label`](Self::set_label), if any.
+    #[must_use]
+    pub fn label(&self) -> Option<String> {
+        self.label.borrow().clone()
+    }
+
     /// Return the current version number.
     ///
     /// The version is incremented (wrapping) on every [`set`](Signal::set)
@@ -568,6 +630,7 @@ impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
         Self {
             state: Rc::clone(&self.state),
+            label: Rc::clone(&self.label),
         }
     }
 }
@@ -581,15 +644,26 @@ impl<T> Clone for Signal<T> {
 impl<T: fmt::Debug> fmt::Debug for Signal<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.borrow();
-        f.debug_struct("Signal")
-            .field("value", &state.value)
+        let mut ds = f.debug_struct("Signal");
+        if let Some(ref label) = self.label.borrow().as_ref() {
+            ds.field("label", label);
+        }
+        ds.field("value", &state.value)
             .field("version", &state.version)
             .field("subscribers", &state.subscribers.len())
             .finish()
     }
 }
 
+#[cfg(not(feature = "diagnostics"))]
 impl<T: Default> Default for Signal<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+impl<T: Default + 'static> Default for Signal<T> {
     fn default() -> Self {
         Self::new(T::default())
     }
@@ -717,14 +791,18 @@ pub fn unsubscribe<T>(sig: &Signal<T>, id: SubscriberId) {
 // ---------------------------------------------------------------------------
 
 thread_local! {
+    /// Primary hook — installed by the executor.  Receives the
+    /// notification closure and pushes it into the deferred-callback
+    /// queue.  Only one primary hook can be active.
     static SCHEDULE_FN: RefCell<Option<Box<dyn Fn(Box<dyn FnOnce()>)>>> = RefCell::new(None);
+
+    /// Observer hooks — notified (with no arguments) whenever a signal
+    /// schedules a notification.  Multiple observers can coexist.
+    /// Used by DevTools, logging, etc.
+    static NOTIFY_OBSERVERS: RefCell<Vec<Box<dyn Fn()>>> = RefCell::new(Vec::new());
 }
 
-/// Install the executor's schedule-callback hook.
-///
-/// Called once by `auralis_task` during initialisation.  The hook
-/// receives a `Box<dyn FnOnce()>` and must push it into the executor's
-/// deferred-callback queue.
+/// Install the executor's schedule-callback hook (primary, single consumer).
 #[doc(hidden)]
 pub fn install_schedule_hook(hook: Box<dyn Fn(Box<dyn FnOnce()>)>) {
     SCHEDULE_FN.with(|cell| {
@@ -732,15 +810,69 @@ pub fn install_schedule_hook(hook: Box<dyn Fn(Box<dyn FnOnce()>)>) {
     });
 }
 
-/// Remove the schedule hook (for test teardown).
+/// Remove the primary schedule hook (for test teardown).
 #[doc(hidden)]
 pub fn remove_schedule_hook() {
     SCHEDULE_FN.with(|cell| {
         *cell.borrow_mut() = None;
     });
+    NOTIFY_OBSERVERS.with(|cell| {
+        cell.borrow_mut().clear();
+    });
+}
+
+/// Add an observer that is called (with no arguments) whenever a
+/// [`Signal::set`](crate::Signal::set) schedules a subscriber
+/// notification.
+///
+/// This is a **passive** observer — it cannot intercept or modify the
+/// notification, and it does not receive the callback itself.  For the
+/// primary consumer hook (used by the executor), see
+/// [`install_schedule_hook`].
+///
+/// Returns an opaque token for [`remove_schedule_observer`].
+///
+/// # Example
+///
+/// ```
+/// use auralis_signal::add_schedule_observer;
+///
+/// add_schedule_observer(Box::new(|| {
+///     // a signal changed — refresh the DevTools panel
+/// }));
+/// ```
+#[must_use]
+pub fn add_schedule_observer(observer: Box<dyn Fn()>) -> usize {
+    NOTIFY_OBSERVERS.with(|cell| {
+        let mut observers = cell.borrow_mut();
+        let idx = observers.len();
+        observers.push(observer);
+        idx
+    })
+}
+
+/// Remove the observer at the given index (returned by
+/// [`add_schedule_observer`]).
+///
+/// No-op if `idx` is out of bounds.
+pub fn remove_schedule_observer(idx: usize) {
+    NOTIFY_OBSERVERS.with(|cell| {
+        let mut observers = cell.borrow_mut();
+        if idx < observers.len() {
+            let _ = observers.remove(idx);
+        }
+    });
 }
 
 pub(crate) fn executor_schedule(f: impl FnOnce() + 'static) {
+    // Notify passive observers first.
+    NOTIFY_OBSERVERS.with(|cell| {
+        for observer in cell.borrow().iter() {
+            observer();
+        }
+    });
+
+    // Then route to the primary consumer hook.
     SCHEDULE_FN.with(|cell| {
         if let Some(hook) = cell.borrow().as_ref() {
             hook(Box::new(f));

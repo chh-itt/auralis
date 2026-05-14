@@ -33,6 +33,10 @@ mod batch;
 mod future;
 mod memo;
 mod observer;
+#[cfg(feature = "diagnostics")]
+mod registry;
+#[cfg(feature = "diagnostics")]
+pub use registry::{dump_registry, ReactiveNodeSnapshot};
 mod signal;
 
 /// Create a [`Memo`] with automatic clone of captured identifiers.
@@ -71,6 +75,7 @@ macro_rules! memo {
 pub use batch::{batch, in_batch};
 pub use future::{FilterChangedFuture, MapChangedFuture, SignalChangedFuture};
 pub use memo::Memo;
+pub use signal::{add_schedule_observer, remove_schedule_observer};
 #[doc(hidden)]
 pub use signal::{install_schedule_hook, remove_schedule_hook};
 #[doc(hidden)]

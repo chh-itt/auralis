@@ -152,7 +152,7 @@ pub fn find_scope(scope_id: ScopeId) -> Option<TaskScope> {
 #[doc(hidden)]
 #[must_use]
 pub fn scope_debug_label(scope_id: ScopeId) -> Option<String> {
-    find_scope(scope_id).and_then(|s| s.inner.borrow().debug_label.clone())
+    find_scope(scope_id).and_then(|s| s.inner.borrow().label.clone())
 }
 
 /// Clear the scope registry.
@@ -359,9 +359,8 @@ struct TaskScopeInner {
     /// re-entrant borrow failures during drop.  `TaskScope` holds a clone
     /// of the same `Rc` for direct access.
     cancelled: Rc<Cell<bool>>,
-    /// Optional label for `dump_task_tree` output (debug feature).
-    #[cfg(feature = "debug")]
-    debug_label: Option<String>,
+    /// Optional label for `dump_reactive_graph` output.
+    label: Option<String>,
     /// The executor that owns tasks spawned in this scope.
     /// Stored as `Rc` (strong reference) so the executor lives
     /// at least as long as the scope — essential for safe
@@ -497,8 +496,7 @@ impl TaskScope {
             context: RefCell::new(HashMap::new()),
             callbacks: RefCell::new(Vec::new()),
             cancelled: Rc::clone(&cancelled),
-            #[cfg(feature = "debug")]
-            debug_label: None,
+            label: None,
             executor: Rc::clone(ex),
         }));
         let id = inner.borrow().id;
@@ -523,8 +521,7 @@ impl TaskScope {
             context: RefCell::new(HashMap::new()),
             callbacks: RefCell::new(Vec::new()),
             cancelled: Rc::clone(&cancelled),
-            #[cfg(feature = "debug")]
-            debug_label: None,
+            label: None,
             executor: ex,
         }));
         let id = inner.borrow().id;
@@ -729,12 +726,28 @@ impl TaskScope {
 
     // -- debugging ----------------------------------------------------------
 
+    /// Set a human-readable label for this scope.
+    ///
+    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
+    /// output and are useful for debugging.
+    pub fn set_label(&self, label: impl Into<String>) {
+        self.inner.borrow_mut().label = Some(label.into());
+    }
+
+    /// Return the label set by [`set_label`](Self::set_label), if any.
+    #[must_use]
+    pub fn label(&self) -> Option<String> {
+        self.inner.borrow().label.clone()
+    }
+
     /// Set a label for this scope, shown in [`dump_task_tree`] output.
     ///
     /// Only available with the `debug` feature.
     #[cfg(feature = "debug")]
+    #[doc(hidden)]
+    #[deprecated(note = "use `set_label` instead")]
     pub fn set_debug_label(&self, label: impl Into<String>) {
-        self.inner.borrow_mut().debug_label = Some(label.into());
+        self.set_label(label);
     }
 
     // -- testing -----------------------------------------------------------

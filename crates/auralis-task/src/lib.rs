@@ -41,7 +41,7 @@ pub mod timer;
 mod debug;
 
 #[cfg(feature = "debug")]
-pub use debug::dump_task_tree;
+pub use debug::{dump_reactive_graph, dump_task_tree};
 pub use executor::{
     init_flush_scheduler, init_time_source, remove_panic_hook, reset_executor_for_test,
     schedule_callback, set_deferred, set_global_max_deferred_callbacks, set_global_time_budget,

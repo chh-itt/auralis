@@ -28,7 +28,7 @@ use std::rc::Rc;
 use crate::observer::{ObserverState, OBSERVER};
 use crate::signal::Signal;
 
-type CleanupFn = Box<dyn FnOnce()>;
+pub(crate) type CleanupFn = Box<dyn FnOnce()>;
 
 thread_local! {
     /// Tracks the depth of nested `Memo::recompute` calls on this thread.
@@ -128,6 +128,8 @@ pub struct Memo<T> {
     /// Number of successful recomputations (including the initial
     /// compute in [`new`](Memo::new)).
     compute_count: Rc<Cell<u64>>,
+    /// Optional label set via [`set_label`](Memo::set_label).
+    label: Rc<RefCell<Option<String>>>,
 }
 
 impl<T: Clone + 'static> Memo<T> {
@@ -169,10 +171,24 @@ impl<T: Clone + 'static> Memo<T> {
             subscriptions,
             computing,
             compute_count,
+            label: Rc::new(RefCell::new(None)),
         };
 
         memo.dirty.set(false);
         memo.compute_count.set(1);
+
+        #[cfg(feature = "diagnostics")]
+        {
+            let weak = Rc::downgrade(&memo.subscriptions);
+            crate::registry::register(crate::registry::make_memo_callback(
+                weak,
+                Rc::clone(&memo.dirty),
+                Rc::clone(&memo.compute_count),
+                Rc::clone(&memo.label),
+                memo.signal.clone(),
+            ));
+        }
+
         memo
     }
 
@@ -228,6 +244,20 @@ impl<T: Clone + 'static> Memo<T> {
     #[must_use]
     pub fn compute_count(&self) -> u64 {
         self.compute_count.get()
+    }
+
+    /// Set a human-readable label for this memo.
+    ///
+    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
+    /// output and are useful for debugging.
+    pub fn set_label(&self, label: impl Into<String>) {
+        *self.label.borrow_mut() = Some(label.into());
+    }
+
+    /// Return the label set by [`set_label`](Self::set_label), if any.
+    #[must_use]
+    pub fn label(&self) -> Option<String> {
+        self.label.borrow().clone()
     }
 
     // ------------------------------------------------------------------
@@ -473,6 +503,7 @@ impl<T> Clone for Memo<T> {
             subscriptions: Rc::clone(&self.subscriptions),
             computing: Rc::clone(&self.computing),
             compute_count: Rc::clone(&self.compute_count),
+            label: Rc::clone(&self.label),
         }
     }
 }
@@ -480,10 +511,12 @@ impl<T> Clone for Memo<T> {
 impl<T: fmt::Debug + 'static> fmt::Debug for Memo<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let subs = self.subscriptions.borrow().len();
-        // Use with() to avoid the Clone bound on read().
         self.signal.with(|value| {
-            f.debug_struct("Memo")
-                .field("value", value)
+            let mut ds = f.debug_struct("Memo");
+            if let Some(ref label) = self.label.borrow().as_ref() {
+                ds.field("label", label);
+            }
+            ds.field("value", value)
                 .field("dirty", &self.dirty.get())
                 .field("subs", &subs)
                 .finish_non_exhaustive()

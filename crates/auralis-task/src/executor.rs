@@ -1409,7 +1409,7 @@ pub fn reset_executor_for_test() {
     crate::scope::clear_scope_registry();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "debug"))]
 pub(crate) fn debug_task_count() -> usize {
     EXECUTOR.with(|exec| exec.borrow().tasks.iter().filter(|t| t.is_some()).count())
 }

@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 default = []
-debug = []
+debug = ["auralis-signal/diagnostics"]
 ssr-tokio = ["dep:tokio"]
 
 [dependencies]
