@@ -728,8 +728,8 @@ impl TaskScope {
 
     /// Set a human-readable label for this scope.
     ///
-    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
-    /// output and are useful for debugging.
+    /// Labels appear in `dump_reactive_graph()` output and are useful
+    /// for debugging.
     pub fn set_label(&self, label: impl Into<String>) {
         self.inner.borrow_mut().label = Some(label.into());
     }

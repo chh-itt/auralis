@@ -25,6 +25,9 @@ Built on `auralis-signal`. `#![forbid(unsafe_code)]`. Single-threaded by design.
 | `schedule_callback(f)` | Run `f` at the start of the next flush |
 | `timer::sleep(dur)` | Cooperative async delay (requires TimeSource for real-time; degrades to yield_now otherwise) |
 | `TaskScope::is_cancelled()` | Check whether the scope has been dropped and its tasks cancelled |
+| `TaskScope::set_label(l)` / `label()` | Optional human-readable label for diagnostics |
+| `dump_reactive_graph()` | Unified snapshot of all signals, memos, and tasks (behind `debug` feature) |
+| `dump_task_tree()` | Backward-compatible alias for `dump_reactive_graph()` |
 
 ## Quick Start
 
@@ -52,7 +55,7 @@ drop(scope); // cancels all spawned tasks
 
 | Feature | Enables |
 |---------|---------|
-| `debug` | `dump_task_tree()` diagnostic snapshot |
+| `debug` | `dump_reactive_graph()` — signals, memos, and tasks diagnostic snapshot; enables `auralis-signal/diagnostics` |
 | `ssr-tokio` | `init_scope_store_tokio()` for multi-request SSR isolation |
 
 ## Key Properties
@@ -66,6 +69,8 @@ drop(scope); // cancels all spawned tasks
 - **Instance isolation** — `Executor::new_instance()` for multi-threaded SSR; slot-based waker routing with generation counters
 - **Cooperative timer** — `timer::sleep(dur)` works with any `TimeSource` implementation
 - **Panic-safe callbacks** — each deferred signal callback is `catch_unwind`-isolated in the executor flush
+- **Labels** — `TaskScope` supports optional labels via `set_label()`
+- **Diagnostics** — `dump_reactive_graph()` (behind `debug` feature) shows all signals, memos, and tasks in one snapshot
 
 ## License
 

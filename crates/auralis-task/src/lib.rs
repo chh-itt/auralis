@@ -11,6 +11,9 @@
 //! - **`set_deferred`** — safe signal mutation from [`Drop`] contexts.
 //! - **Pluggable storage** — [`ScopeStore`] and [`Executor::new_instance`]
 //!   enable multi-request isolation for SSR or multi-threaded runtimes.
+//! - **Diagnostics** — `dump_reactive_graph()` (behind the `debug`
+//!   feature) provides a unified snapshot of all signals, memos, and
+//!   tasks.  [`TaskScope`] supports optional labels for diagnostic output.
 //!
 //! # Quick example
 //!

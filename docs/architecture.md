@@ -23,6 +23,7 @@ auralis/
 | `batch.rs` | `BatchGuard`, `batch()`, `in_batch()`: batched signal updates with panic safety |
 | `observer.rs` | `ObserverState`, `OBSERVER` thread-local: dependency-tracking infrastructure used by `Memo` |
 | `future.rs` | `SignalChangedFuture`, `MapChangedFuture`, `FilterChangedFuture`: proactive waker deregistration |
+| `registry.rs` | Thread-local reactive node registry for `dump_reactive_graph()` (behind `diagnostics` feature) |
 | `lib.rs` | Crate root, public API re-exports |
 
 ### Notification State Machine
@@ -99,7 +100,7 @@ to its sources and recovers on the next successful `read()`.
 | `executor.rs` | Single-threaded executor: dual priority queues, timer queue, time budget, deferred ops/callbacks, slot-based waker routing, instance isolation, configurable panic hook |
 | `scope.rs` | `TaskScope` tree: parent/child relations, iterative cancellation, suspend/resume, context DI, `CallbackHandle` |
 | `timer.rs` | `timer::sleep()` cooperative delay, `SleepFuture` with deadline re-check |
-| `debug.rs` | `dump_task_tree()` diagnostic (behind `debug` feature) |
+| `debug.rs` | `dump_reactive_graph()` — unified reactive graph snapshot including signals, memos, and tasks (behind `debug` feature) |
 | `lib.rs` | Crate root, public API + `Priority` enum |
 
 ### Executor Architecture
@@ -186,12 +187,71 @@ let val: Rc<i32> = scope.expect_context();  // same, but panics if missing
 
 Child scope values shadow parent scope values of the same type.
 
+## Diagnostics Infrastructure
+
+Auralis provides built-in introspection for debugging reactive systems:
+
+### Labels
+
+`Signal`, `Memo`, and `TaskScope` each carry an optional label (a short string)
+that appears in `Debug` output and `dump_reactive_graph()`.  Labels are always
+available — the overhead is a single `Rc<RefCell<Option<String>>>` per node.
+
+```rust
+let sig = Signal::new(0);
+sig.set_label("counter");
+assert_eq!(sig.label(), Some("counter".to_string()));
+```
+
+### Reactive Node Registry
+
+Behind the `diagnostics` feature (enabled automatically by `auralis-task`'s
+`debug` feature), every `Signal::new` and `Memo::new` registers a callback in
+a thread-local registry.  The callback captures `Weak` references to the node's
+internal state; dead nodes (dropped signals/memos) are automatically pruned.
+
+`dump_registry()` returns a `Vec<ReactiveNodeSnapshot>` with the label, version,
+subscriber count, dirty state (for memos), compute count, and dependency count
+of every live node.
+
+### Schedule Observers
+
+`add_schedule_observer(Box<dyn Fn()>)` registers a passive hook that fires on
+every signal mutation (`set`, `update`, `bump_version`).  Multiple observers
+can coexist.  A generation-based `ObserverToken` prevents stale-token misuse.
+Observers are individually `catch_unwind`-isolated and re-entrant calls are
+silently skipped.
+
+### `dump_reactive_graph()`
+
+Unified diagnostic output (behind `auralis-task`'s `debug` feature) showing
+all signals, memos, and tasks in one snapshot:
+
+```text
+=== Auralis Reactive Graph ===
+Signals: 3  Memos: 2  Tasks: 4
+
+── Signals ──
+  "counter"  ver=42  subs=1  addr=0x...
+  (unnamed)  ver=7   subs=0  addr=0x...
+
+── Memos ──
+  "sum"  ver=42  subs=1  dirty=false  computed=15x  deps=2  addr=0x...
+
+── Tasks ──
+Scope 1 "root":
+  task 0  [L]  queued
+```
+
+`dump_task_tree()` remains available as a backward-compatible alias.
+
 ## Feature Flags
 
-| Feature | Enables |
-|---------|---------|
-| `debug` | `dump_task_tree()` diagnostic snapshot |
-| `ssr-tokio` | `init_scope_store_tokio()` for tokio task-local storage |
+| Feature | Crate | Enables |
+|---------|-------|---------|
+| `debug` | `auralis-task` | `dump_reactive_graph()` + reactive node registry (forwards to `auralis-signal/diagnostics`) |
+| `diagnostics` | `auralis-signal` | Reactive node registry, `ReactiveNodeSnapshot`, `dump_registry()` |
+| `ssr-tokio` | `auralis-task` | `init_scope_store_tokio()` for tokio task-local storage |
 
 ## Build Configuration
 

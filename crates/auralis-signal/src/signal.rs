@@ -263,6 +263,7 @@ impl<T> Signal<T> {
         let mut state = self.state.borrow_mut();
         state.value = val;
         state.version = state.version.wrapping_add(1);
+        notify_schedule_observers();
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -426,6 +427,7 @@ impl<T> Signal<T> {
         let mut state = self.state.borrow_mut();
         f(&mut state.value);
         state.version = state.version.wrapping_add(1);
+        notify_schedule_observers();
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -562,9 +564,8 @@ impl<T> Signal<T> {
 
     /// Set a human-readable label for this signal.
     ///
-    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
-    /// output and are useful for debugging.  Multiple signals can share
-    /// the same label.
+    /// Labels appear in `dump_reactive_graph()` output and are useful
+    /// for debugging.  Multiple signals can share the same label.
     ///
     /// # Example
     ///
@@ -618,6 +619,7 @@ impl<T> Signal<T> {
     {
         let mut state = self.state.borrow_mut();
         state.version = state.version.wrapping_add(1);
+        notify_schedule_observers();
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -790,16 +792,30 @@ pub fn unsubscribe<T>(sig: &Signal<T>, id: SubscriberId) {
 // Hook point — set by the task executor at init time
 // ---------------------------------------------------------------------------
 
+/// Opaque token returned by [`add_schedule_observer`].  Pass it to
+/// [`remove_schedule_observer`] to deregister.
+#[derive(Debug, Clone, Copy)]
+pub struct ObserverToken {
+    index: usize,
+    generation: u64,
+}
+
+struct ObserverSlot {
+    observer: Option<Box<dyn Fn()>>,
+    /// Incremented (wrapping) every time this slot is reused.
+    /// A stale [`ObserverToken`] whose generation doesn't match
+    /// is silently ignored by [`remove_schedule_observer`].
+    generation: u64,
+}
+
 thread_local! {
-    /// Primary hook — installed by the executor.  Receives the
-    /// notification closure and pushes it into the deferred-callback
-    /// queue.  Only one primary hook can be active.
+    /// Primary hook — installed by the executor.
     static SCHEDULE_FN: RefCell<Option<Box<dyn Fn(Box<dyn FnOnce()>)>>> = RefCell::new(None);
 
-    /// Observer hooks — notified (with no arguments) whenever a signal
-    /// schedules a notification.  Multiple observers can coexist.
+    /// Observer hooks — notified (with no arguments) whenever a
+    /// signal mutation occurs.  Multiple observers can coexist.
     /// Used by DevTools, logging, etc.
-    static NOTIFY_OBSERVERS: RefCell<Vec<Box<dyn Fn()>>> = RefCell::new(Vec::new());
+    static NOTIFY_OBSERVERS: RefCell<Vec<ObserverSlot>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Install the executor's schedule-callback hook (primary, single consumer).
@@ -830,49 +846,70 @@ pub fn remove_schedule_hook() {
 /// primary consumer hook (used by the executor), see
 /// [`install_schedule_hook`].
 ///
-/// Returns an opaque token for [`remove_schedule_observer`].
+/// Returns an [`ObserverToken`] for [`remove_schedule_observer`].
+///
+/// # Re-entrancy
+///
+/// Adding or removing observers from **inside** an observer callback
+/// will panic — the observer list is already borrowed during
+/// notification.  Observers should be lightweight (set a flag, log a
+/// message) and should not mutate the observer list.
 ///
 /// # Example
 ///
 /// ```
 /// use auralis_signal::add_schedule_observer;
 ///
-/// add_schedule_observer(Box::new(|| {
+/// let token = add_schedule_observer(Box::new(|| {
 ///     // a signal changed — refresh the DevTools panel
 /// }));
 /// ```
 #[must_use]
-pub fn add_schedule_observer(observer: Box<dyn Fn()>) -> usize {
+pub fn add_schedule_observer(observer: Box<dyn Fn()>) -> ObserverToken {
     NOTIFY_OBSERVERS.with(|cell| {
         let mut observers = cell.borrow_mut();
+        // Reuse a freed slot if available (preserving the bumped generation).
+        for (i, slot) in observers.iter_mut().enumerate() {
+            if slot.observer.is_none() {
+                let gen = slot.generation;
+                slot.observer = Some(observer);
+                return ObserverToken {
+                    index: i,
+                    generation: gen,
+                };
+            }
+        }
         let idx = observers.len();
-        observers.push(observer);
-        idx
+        let gen = 0;
+        observers.push(ObserverSlot {
+            observer: Some(observer),
+            generation: gen,
+        });
+        ObserverToken {
+            index: idx,
+            generation: gen,
+        }
     })
 }
 
-/// Remove the observer at the given index (returned by
-/// [`add_schedule_observer`]).
+/// Remove a previously-registered observer.
 ///
-/// No-op if `idx` is out of bounds.
-pub fn remove_schedule_observer(idx: usize) {
+/// The token is **consumed** — calling this a second time with the
+/// same token is a no-op (the generation counter is bumped on
+/// removal, so the stale token no longer matches).
+pub fn remove_schedule_observer(token: ObserverToken) {
     NOTIFY_OBSERVERS.with(|cell| {
         let mut observers = cell.borrow_mut();
-        if idx < observers.len() {
-            let _ = observers.remove(idx);
+        if let Some(slot) = observers.get_mut(token.index) {
+            if slot.generation == token.generation && slot.observer.is_some() {
+                slot.observer = None;
+                slot.generation = slot.generation.wrapping_add(1);
+            }
         }
     });
 }
 
 pub(crate) fn executor_schedule(f: impl FnOnce() + 'static) {
-    // Notify passive observers first.
-    NOTIFY_OBSERVERS.with(|cell| {
-        for observer in cell.borrow().iter() {
-            observer();
-        }
-    });
-
-    // Then route to the primary consumer hook.
     SCHEDULE_FN.with(|cell| {
         if let Some(hook) = cell.borrow().as_ref() {
             hook(Box::new(f));
@@ -880,6 +917,49 @@ pub(crate) fn executor_schedule(f: impl FnOnce() + 'static) {
             // No executor hook installed — invoke synchronously as
             // a fallback (tests that don't initialise the executor).
             f();
+        }
+    });
+}
+
+thread_local! {
+    /// Guard against re-entrant observer notification.  If an observer
+    /// callback calls `Signal::set` (triggering another round of
+    /// `notify_schedule_observers`), the nested call is a no-op.
+    static IN_NOTIFY_OBSERVERS: Cell<bool> = const { Cell::new(false) };
+}
+
+struct NotifyGuard;
+
+impl Drop for NotifyGuard {
+    fn drop(&mut self) {
+        IN_NOTIFY_OBSERVERS.with(|c| c.set(false));
+    }
+}
+
+/// Notify all passive schedule-observer hooks.  Called from every
+/// signal mutation path (*before* subscriber notification routing)
+/// so `DevTools` can observe every change, even on signals with no
+/// current subscribers.
+///
+/// Re-entrant calls (e.g. an observer callback that calls
+/// [`Signal::set`](crate::Signal::set) on another signal) are
+/// silently ignored to avoid a `RefCell` borrow panic.
+fn notify_schedule_observers() {
+    if IN_NOTIFY_OBSERVERS.with(|c| c.replace(true)) {
+        return; // re-entrant — skip
+    }
+    let _guard = NotifyGuard;
+
+    // Each observer is individually isolated — a panic in one
+    // observer does not prevent the others from firing (matching
+    // the executor's per-callback isolation in flush step 2).
+    NOTIFY_OBSERVERS.with(|cell| {
+        for slot in cell.borrow().iter() {
+            if let Some(ref observer) = slot.observer {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    observer();
+                }));
+            }
         }
     });
 }

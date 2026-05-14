@@ -123,6 +123,8 @@ Auralis 的赌注是 **"小 10 倍"，而不是"强大 10 倍"**。它刻意牺�
 - **`JoinHandle`**——`spawn()` 返回可取消句柄，支持单任务取消/完成检测
 - **`watch` / `watch_effect`**——自动追踪副作用
 - **Panic 安全清理**——`CallbackHandle::drop` 由 `catch_unwind` 隔离
+- **标签系统**——`Signal`、`Memo` 和 `TaskScope` 支持可选标签，用于诊断输出
+- **调度观察者**——`add_schedule_observer()` 注册被动钩子，在每次 signal 变更时触发
 
 ## 多线程
 
@@ -198,12 +200,13 @@ crates/
       batch.rs          # BatchGuard、batch()、in_batch()
       observer.rs       # ObserverState、OBSERVER thread-local
       future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
+      registry.rs       # 响应式节点注册表（diagnostics feature）
   auralis-task/         # TaskScope 树、执行器、timer、上下文 DI
     src/
       executor.rs       # 优先级执行器、时间预算、延迟回调
       scope.rs          # TaskScope、CallbackHandle、上下文系统
       timer.rs          # timer::sleep() 协作延迟
-        debug.rs          # dump_task_tree()（feature-gated）
+        debug.rs          # dump_reactive_graph()（feature-gated）
     examples/
       counter.rs        # 可运行的 CLI 示例
     tests/
@@ -225,7 +228,8 @@ docs/
 
 | Feature | 所属 Crate | 启用内容 |
 |---------|-----------|---------|
-| `debug` | `auralis-task` | `dump_task_tree()` 诊断 |
+| `debug` | `auralis-task` | `dump_reactive_graph()` — signal、memo 和 task 统一快照；同时启用 `auralis-signal/diagnostics` |
+| `diagnostics` | `auralis-signal` | 响应式节点注册表、`ReactiveNodeSnapshot`、`dump_registry()` |
 | `ssr-tokio` | `auralis-task` | Tokio task-local 存储，多请求 SSR 隔离 |
 
 ## 运行

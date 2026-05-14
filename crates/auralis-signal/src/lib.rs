@@ -10,9 +10,15 @@
 //! internal list, preventing stale-waker accumulation (the "proactive
 //! deregistration" guarantee).
 //!
+//! Signals and memos support optional **labels** for diagnostic output,
+//! and the [`add_schedule_observer`] hook lets external tools observe
+//! every signal mutation.  Behind the `diagnostics` feature (enabled by
+//! `auralis_task`'s `debug` feature), a thread-local registry tracks
+//! live nodes for `dump_registry()`.
+//!
 //! The crate is **zero-dependency**, **`#![forbid(unsafe_code)]`**, and
 //! intentionally single-threaded (`!Send` / `!Sync`).  See the
-//! [repository design docs](https://github.com/user/auralis) for the
+//! [repository design docs](https://github.com/chh-itt/auralis) for the
 //! rationale behind those choices.
 //!
 //! # Quick example
@@ -75,7 +81,7 @@ macro_rules! memo {
 pub use batch::{batch, in_batch};
 pub use future::{FilterChangedFuture, MapChangedFuture, SignalChangedFuture};
 pub use memo::Memo;
-pub use signal::{add_schedule_observer, remove_schedule_observer};
+pub use signal::{add_schedule_observer, remove_schedule_observer, ObserverToken};
 #[doc(hidden)]
 pub use signal::{install_schedule_hook, remove_schedule_hook};
 #[doc(hidden)]

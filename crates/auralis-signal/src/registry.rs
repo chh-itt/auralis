@@ -11,23 +11,28 @@ use std::rc::{Rc, Weak};
 use crate::signal::SignalState;
 
 /// A snapshot of a reactive node's metadata for diagnostic output.
+///
+/// Returned by [`dump_registry`].  Memo-specific fields
+/// (`is_dirty`, `compute_count`, `dependency_count`) are `None`
+/// for signals.
 #[derive(Debug, Clone)]
 pub struct ReactiveNodeSnapshot {
-    /// The label set via `set_label()`, if any.
+    /// The label set via `set_label()`, or `None` if unlabelled.
     pub label: Option<String>,
     /// `"Signal"` or `"Memo"`.
     pub node_type: &'static str,
-    /// Current version number.
+    /// Current monotonic version number.
     pub version: u64,
     /// Number of active subscriber callbacks.
     pub subscriber_count: usize,
-    /// Opaque identity (Rc pointer address).
+    /// Opaque identity based on the `Rc` pointer address.
+    /// Distinguishes signals that share the same label.
     pub state_addr: usize,
-    /// `true` if the memo is waiting for recomputation.
+    /// `true` if the memo has pending recomputation (`None` for signals).
     pub is_dirty: Option<bool>,
-    /// Number of successful recomputations.
+    /// Number of successful recomputations (`None` for signals).
     pub compute_count: Option<u64>,
-    /// Number of source signal dependencies.
+    /// Number of source signal dependencies (`None` for signals).
     pub dependency_count: Option<usize>,
 }
 
@@ -49,20 +54,32 @@ pub(crate) fn register(cb: RegistryCallback) {
 /// registry.
 #[must_use]
 pub fn dump_registry() -> Vec<ReactiveNodeSnapshot> {
-    REACTIVE_REGISTRY.with(|reg| {
-        let mut snapshots = Vec::new();
-        let mut alive: Vec<RegistryCallback> = Vec::new();
+    // Drain callbacks into a temporary vec first so we don't hold
+    // the RefCell borrow during callback invocation — a callback
+    // that calls `Signal::new` (registering a new node) would
+    // otherwise hit a RefCell panic.
+    let drained: Vec<RegistryCallback> =
+        REACTIVE_REGISTRY.with(|reg| reg.borrow_mut().drain(..).collect());
 
-        for cb in reg.borrow_mut().drain(..) {
-            if let Some(snap) = cb() {
-                snapshots.push(snap);
-                alive.push(cb);
-            }
+    let mut snapshots = Vec::new();
+    let mut alive: Vec<RegistryCallback> = Vec::new();
+
+    for cb in drained {
+        if let Some(snap) = cb() {
+            snapshots.push(snap);
+            alive.push(cb);
         }
+    }
 
-        *reg.borrow_mut() = alive;
-        snapshots
-    })
+    REACTIVE_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        // Merge any callbacks that were registered during callback
+        // invocation with the survivors.
+        alive.append(&mut *reg);
+        *reg = alive;
+    });
+
+    snapshots
 }
 
 /// Build a callback that captures a [`Weak`] pointer to a signal's state
@@ -92,22 +109,23 @@ pub(crate) fn make_signal_callback<T: 'static>(
 /// when the memo is still live.
 pub(crate) fn make_memo_callback<T: 'static>(
     weak_subs: Weak<RefCell<Vec<(crate::memo::SignalKey, crate::memo::CleanupFn)>>>,
+    weak_signal: Weak<RefCell<SignalState<T>>>,
     dirty: Rc<std::cell::Cell<bool>>,
     compute_count: Rc<std::cell::Cell<u64>>,
     label: Rc<RefCell<Option<String>>>,
-    signal: crate::Signal<T>,
+    state_addr: usize,
 ) -> RegistryCallback {
     Box::new(move || {
         let subs = weak_subs.upgrade()?;
+        let signal_state = weak_signal.upgrade()?;
+        let s = signal_state.borrow();
         let dep_count = subs.borrow().len();
-        let version = signal.version();
-        let subscriber_count = signal.subscriber_count();
         Some(ReactiveNodeSnapshot {
             label: label.borrow().clone(),
             node_type: "Memo",
-            version,
-            subscriber_count,
-            state_addr: signal.state_addr(),
+            version: s.version,
+            subscriber_count: s.subscribers.len(),
+            state_addr,
             is_dirty: Some(dirty.get()),
             compute_count: Some(compute_count.get()),
             dependency_count: Some(dep_count),

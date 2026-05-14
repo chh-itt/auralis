@@ -179,13 +179,16 @@ impl<T: Clone + 'static> Memo<T> {
 
         #[cfg(feature = "diagnostics")]
         {
-            let weak = Rc::downgrade(&memo.subscriptions);
+            let weak_subs = Rc::downgrade(&memo.subscriptions);
+            let weak_signal = Rc::downgrade(&memo.signal.state);
+            let state_addr = Rc::as_ptr(&memo.signal.state) as usize;
             crate::registry::register(crate::registry::make_memo_callback(
-                weak,
+                weak_subs,
+                weak_signal,
                 Rc::clone(&memo.dirty),
                 Rc::clone(&memo.compute_count),
                 Rc::clone(&memo.label),
-                memo.signal.clone(),
+                state_addr,
             ));
         }
 
@@ -248,8 +251,8 @@ impl<T: Clone + 'static> Memo<T> {
 
     /// Set a human-readable label for this memo.
     ///
-    /// Labels appear in [`dump_reactive_graph`](crate::dump_reactive_graph)
-    /// output and are useful for debugging.
+    /// Labels appear in `dump_reactive_graph()` output and are useful
+    /// for debugging.
     pub fn set_label(&self, label: impl Into<String>) {
         *self.label.borrow_mut() = Some(label.into());
     }

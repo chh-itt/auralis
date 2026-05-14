@@ -678,3 +678,25 @@ fn memo_dependency_diff_large_scale_swap() {
         assert_eq!(s.debug_count_waiters(), 1, "all of B should be subscribed");
     }
 }
+
+#[test]
+fn memo_label_set_and_get() {
+    let sig = Signal::new(1);
+    let memo = Memo::new(move || sig.read() * 2);
+
+    assert_eq!(memo.label(), None);
+    memo.set_label("doubler");
+    assert_eq!(memo.label(), Some("doubler".to_string()));
+}
+
+#[test]
+fn memo_label_clone_shares_label() {
+    let sig = Signal::new(1);
+    let memo = Memo::new(move || sig.read() * 2);
+    memo.set_label("orig");
+    let clone = memo.clone();
+    assert_eq!(clone.label(), Some("orig".to_string()));
+
+    clone.set_label("updated");
+    assert_eq!(memo.label(), Some("updated".to_string()));
+}

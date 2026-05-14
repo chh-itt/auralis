@@ -22,11 +22,11 @@ use crate::Priority;
 /// Signals: 3  Memos: 2  Tasks: 4
 ///
 /// ── Signals ──
-///   "counter"        ver=42  subs=1  Signal<i32>
-///   (unnamed)        ver=7   subs=0  Signal<String>
+///   "counter"  ver=42  subs=1  addr=0x...
+///   (unnamed)  ver=7   subs=0  addr=0x...
 ///
 /// ── Memos ──
-///   "sum"            ver=42  subs=1  dirty=false  computed=15x  deps=2
+///   "sum"  ver=42  subs=1  dirty=false  computed=15x  deps=2  addr=0x...
 ///
 /// ── Tasks ──
 /// Scope 1 "root":
@@ -143,4 +143,55 @@ fn write_task_tree(out: &mut String) {
 #[must_use]
 pub fn dump_task_tree() -> String {
     dump_reactive_graph()
+}
+
+#[cfg(test)]
+mod tests {
+    use auralis_signal::{Memo, Signal};
+
+    #[test]
+    fn dump_reactive_graph_includes_signals_and_memos() {
+        let sig = Signal::new(42);
+        sig.set_label("answer");
+        let output = super::dump_reactive_graph();
+        assert!(
+            output.contains("Signals:"),
+            "should include signal count header"
+        );
+        assert!(
+            output.contains("\"answer\""),
+            "should include labelled signal"
+        );
+        assert!(output.contains("ver="), "should include version");
+        assert!(output.contains("subs="), "should include subscriber count");
+
+        let sig2 = sig.clone();
+        // Verify empty label renders as "".
+        sig2.set_label("");
+        let memo = Memo::new(move || sig2.read() + 1);
+        memo.set_label("plus_one");
+        let output2 = super::dump_reactive_graph();
+        assert!(
+            output2.contains("Memos:"),
+            "should include memo count header"
+        );
+        assert!(
+            output2.contains("\"plus_one\""),
+            "should include labelled memo"
+        );
+        assert!(output2.contains("dirty="), "should include dirty flag");
+        assert!(
+            output2.contains("computed="),
+            "should include compute count"
+        );
+    }
+
+    #[test]
+    fn dump_reactive_graph_shows_tasks_section() {
+        let output = super::dump_reactive_graph();
+        assert!(
+            output.contains("── Tasks ──"),
+            "should include tasks section"
+        );
+    }
 }

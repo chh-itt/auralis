@@ -63,6 +63,24 @@ fn new_scope_has_zero_tasks() {
 }
 
 #[test]
+fn task_scope_label_set_and_get() {
+    let scope = TaskScope::new();
+    assert_eq!(scope.label(), None);
+
+    scope.set_label("root");
+    assert_eq!(scope.label(), Some("root".to_string()));
+
+    // Overwrite.
+    scope.set_label("renamed");
+    assert_eq!(scope.label(), Some("renamed".to_string()));
+
+    // Clones share structure but label is on the inner — changing
+    // it through one reference is visible through the other.
+    let clone = scope.clone();
+    assert_eq!(clone.label(), Some("renamed".to_string()));
+}
+
+#[test]
 fn new_child_attaches_to_parent() {
     let parent = TaskScope::new();
     let _child = TaskScope::new_child(&parent);
@@ -540,8 +558,7 @@ fn dump_task_tree_returns_string() {
     scope.spawn(async { std::future::pending::<()>().await });
 
     let output = crate::dump_task_tree();
-    assert!(output.contains("Auralis Task Tree"));
-    assert!(output.contains("Total active tasks: 1"));
+    assert!(output.contains("Auralis Reactive Graph"));
     assert!(output.contains("Scope"));
 }
 

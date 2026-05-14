@@ -28,6 +28,11 @@ Zero dependencies. `#![forbid(unsafe_code)]`. Single-threaded by design (`!Send`
 | `Signal::version()` | Return the current monotonic version number |
 | `Memo::is_dirty()` | Check whether a source has changed without triggering computation |
 | `Memo::compute_count()` | Number of successful recomputations (including initial) |
+| `Signal::set_label(l)` / `label()` | Optional human-readable label for diagnostics |
+| `Memo::set_label(l)` / `label()` | Optional human-readable label for diagnostics |
+| `add_schedule_observer(f)` | Register a passive hook that fires on every signal mutation |
+| `remove_schedule_observer(tok)` | Deregister an observer (generation-safe token) |
+| `dump_registry()` | Snapshot all live reactive nodes (behind `diagnostics` feature) |
 
 ## Quick Start
 
@@ -62,6 +67,9 @@ assert_eq!(x.read(), 3);
 - **Panic-safe Memo** — if the compute function panics, old source subscriptions stay intact; the memo recovers on the next successful `read()`
 - **Incremental subscription updates** — during recompute, shared dependencies are kept; only removed/new signals trigger subscribe/unsubscribe
 - **Panic-safe batch** — `catch_unwind` around each individual notification in the batch drain
+- **Labels** — `Signal` and `Memo` support optional labels for diagnostic output at near-zero overhead
+- **Schedule observers** — `add_schedule_observer()` registers passive hooks; each observer is `catch_unwind`-isolated, re-entrant calls are silently skipped
+- **Diagnostics registry** — `dump_registry()` (behind `diagnostics` feature) returns a snapshot of all live reactive nodes
 
 ## License
 

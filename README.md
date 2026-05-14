@@ -130,6 +130,8 @@ a graph.
 - **`JoinHandle`** from `spawn()` — cancel or check individual tasks
 - **`watch` / `watch_effect`** — auto-tracking side effects
 - **Panic-safe cleanup** — `CallbackHandle::drop` is `catch_unwind`-isolated
+- **Labels** — `Signal`, `Memo`, and `TaskScope` support optional labels for diagnostic output
+- **Schedule observers** — `add_schedule_observer()` registers passive hooks that fire on every signal mutation
 
 ## Multi-threading
 
@@ -206,12 +208,13 @@ crates/
       batch.rs          # BatchGuard, batch(), in_batch()
       observer.rs       # ObserverState, OBSERVER thread-local
       future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
+      registry.rs       # Reactive node registry (diagnostics feature)
   auralis-task/         # TaskScope tree, executor, timer, context DI
     src/
       executor.rs       # Priority executor, time budget, deferred callbacks
       scope.rs          # TaskScope, CallbackHandle, context system
       timer.rs          # timer::sleep() cooperative delay
-        debug.rs          # dump_task_tree() (feature-gated)
+        debug.rs          # dump_reactive_graph() (feature-gated)
     examples/
       counter.rs        # Runnable CLI demo
     tests/
@@ -233,7 +236,8 @@ docs/
 
 | Feature | Crate | Enables |
 |---------|-------|---------|
-| `debug` | `auralis-task` | `dump_task_tree()` diagnostic |
+| `debug` | `auralis-task` | `dump_reactive_graph()` — signals, memos, and tasks in one snapshot; also enables `auralis-signal/diagnostics` |
+| `diagnostics` | `auralis-signal` | Reactive node registry, `ReactiveNodeSnapshot`, `dump_registry()` |
 | `ssr-tokio` | `auralis-task` | Tokio task-local storage for multi-request SSR |
 
 ## Running
