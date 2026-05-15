@@ -64,6 +64,10 @@ td.addr{color:#484f58;font-size:9px}
       <h2>Component Tree</h2>
       <div id="dt-components" style="font-size:10px"></div>
     </div>
+    <div class="dt-panel" style="max-width:280px">
+      <h2>Derivation Tree</h2>
+      <div id="dt-derivations" style="font-size:10px"></div>
+    </div>
     <div class="dt-panel">
       <h2>Dependency Graph</h2>
       <svg id="dt-graph"></svg>
@@ -127,6 +131,7 @@ function render(snap) {
 
   renderGraph(snap.signals, snap.memos);
   renderComponents(snap.component_tree || [], signalMap);
+  renderDerivationTree(snap.derivation_tree || []);
 }
 
 function countTasks(tree) {
@@ -188,6 +193,52 @@ function renderComponents(tree, signalMap) {
       if (collapsed[path]) { delete collapsed[path]; }
       else { collapsed[path] = true; }
       renderComponents(lastComponentTree, lastSignalMap);
+    };
+  }
+}
+
+var lastDerivationTree = [], derCollapsed = {};
+function renderDerivationTree(tree) {
+  lastDerivationTree = tree;
+  var el = document.getElementById('dt-derivations');
+  if (!tree || !tree.length) { el.innerHTML = '<span style="color:#484f58">(no derivations)</span>'; return; }
+
+  function node(n, depth, path) {
+    var kids = n.depended_by || [];
+    var hasKids = kids.length > 0;
+    var isCollapsed = derCollapsed[path] === true;
+    var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px;margin-bottom:2px">';
+    var arrow = hasKids ? (isCollapsed ? '▶' : '▼') : ' ';
+    h += '<span class="dt-der-toggle" data-dt-path="'+esc(path)+'" style="cursor:pointer;color:#8b949e;user-select:none">'+arrow+'</span> ';
+    var isMemo = n.node_type === 'Memo';
+    var icon = isMemo ? '◆' : '●';
+    var clr = isMemo ? '#3fb950' : '#58a6ff';
+    h += '<span style="color:#484f58;font-size:9px">'+icon+'</span> ';
+    h += '<span style="color:#c9d1d9;font-size:10px">'+esc(n.label||'(unnamed)')+'</span>';
+    h += ' <span style="font-size:9px;color:'+clr+'">'+esc(n.node_type||'?')+'</span>';
+    if (n.type_name) {
+      h += ' <span style="color:#484f58;font-size:9px">'+esc(n.type_name.split('::').pop()||n.type_name)+'</span>';
+    }
+    if (n.value_debug) {
+      h += ' <span style="color:#d2a8ff;font-size:9px">'+esc(n.value_debug)+'</span>';
+    }
+    if (hasKids) {
+      h += '<div class="dt-der-kids" style="display:'+(isCollapsed ? 'none' : 'block')+'">';
+      for (var i=0;i<kids.length;i++) h += node(kids[i], depth+1, path+'/'+kids[i].addr);
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  el.innerHTML = tree.map(function(n){return node(n, 0, n.addr)}).join('');
+  var toggles = el.querySelectorAll('.dt-der-toggle');
+  for (var i = 0; i < toggles.length; i++) {
+    toggles[i].onclick = function() {
+      var path = this.getAttribute('data-dt-path');
+      if (derCollapsed[path]) { delete derCollapsed[path]; }
+      else { derCollapsed[path] = true; }
+      renderDerivationTree(lastDerivationTree);
     };
   }
 }

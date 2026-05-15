@@ -19,6 +19,9 @@ pub struct ReactiveSnapshot {
     pub timeline: Vec<crate::timeline::TimelineEntry>,
     /// Optional component tree (set by host frameworks like Leptos).
     pub component_tree: serde_json::Value,
+    /// Derivation tree: signals → memos, organised by data-dependency
+    /// edges.  Roots are original signals; branches are derived memos.
+    pub derivation_tree: Vec<DerivationNode>,
     /// The formatted task tree (text), kept for backward compatibility.
     pub task_tree: String,
 }
@@ -63,8 +66,141 @@ pub struct MemoEntry {
     pub addr: String,
 }
 
+/// A node in the derivation tree — the reactive data-flow graph
+/// rendered as a tree.  Roots are original signals (no dependencies);
+/// branches are memos that depend on them.
+///
+/// A memo with *N* source dependencies appears as a child under *all
+/// N* parents.  The DAG is expanded into a tree by duplicating
+/// multi-parent nodes.
+#[derive(Debug, Clone, Serialize)]
+pub struct DerivationNode {
+    /// Label set via `set_label()`, if any.
+    pub label: Option<String>,
+    /// Hex address of the underlying `SignalState` allocation.
+    pub addr: String,
+    /// `"Signal"` or `"Memo"`.
+    pub node_type: String,
+    /// Rust type name.
+    pub type_name: Option<String>,
+    /// Debug representation of the current value, if a formatter was set.
+    pub value_debug: Option<String>,
+    /// Current version.
+    pub version: u64,
+    /// Nodes that depend on this one (children in the tree).
+    pub depended_by: Vec<DerivationNode>,
+}
+
 fn fmt_addr(addr: usize) -> String {
     format!("{addr:#x}")
+}
+
+/// Build a derivation tree from the flat signal/memo lists.
+///
+/// Roots are nodes with no known dependencies (original signals, and
+/// any memo whose sources have all been dropped).  Multi-parent memos
+/// appear as children under *each* parent — the DAG is expanded into a
+/// tree by duplication.
+fn build_derivation_tree(signals: &[SignalEntry], memos: &[MemoEntry]) -> Vec<DerivationNode> {
+    use std::collections::{HashMap, HashSet};
+
+    // addr → (label, node_type, type_name, value_debug, version)
+    struct NodeMeta {
+        label: Option<String>,
+        node_type: String,
+        type_name: Option<String>,
+        value_debug: Option<String>,
+        version: u64,
+    }
+
+    fn build_recursive(
+        addr: &str,
+        meta: &HashMap<String, NodeMeta>,
+        children: &HashMap<String, Vec<String>>,
+        visited: &mut HashSet<String>,
+    ) -> DerivationNode {
+        let info = meta.get(addr).expect("node metadata must exist");
+        let kid_addrs: Vec<String> = children.get(addr).cloned().unwrap_or_default();
+
+        let mut depended_by: Vec<DerivationNode> = Vec::new();
+        for kid in &kid_addrs {
+            if visited.insert(kid.clone()) {
+                depended_by.push(build_recursive(kid, meta, children, visited));
+                visited.remove(kid);
+            }
+        }
+
+        DerivationNode {
+            label: info.label.clone(),
+            addr: addr.to_string(),
+            node_type: info.node_type.clone(),
+            type_name: info.type_name.clone(),
+            value_debug: info.value_debug.clone(),
+            version: info.version,
+            depended_by,
+        }
+    }
+
+    let mut node_meta: HashMap<String, NodeMeta> = HashMap::new();
+    let mut roots: Vec<String> = Vec::new();
+
+    for s in signals {
+        node_meta.insert(
+            s.addr.clone(),
+            NodeMeta {
+                label: s.label.clone(),
+                node_type: "Signal".into(),
+                type_name: Some(s.type_name.clone()),
+                value_debug: s.value_debug.clone(),
+                version: s.version,
+            },
+        );
+        roots.push(s.addr.clone());
+    }
+
+    // children[dep_addr] = [child_addr]
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+
+    for m in memos {
+        node_meta.insert(
+            m.addr.clone(),
+            NodeMeta {
+                label: m.label.clone(),
+                node_type: "Memo".into(),
+                type_name: Some(m.type_name.clone()),
+                value_debug: None,
+                version: m.version,
+            },
+        );
+
+        let known_deps: Vec<&str> = m
+            .dependency_addrs
+            .iter()
+            .filter(|a| node_meta.contains_key(*a))
+            .map(String::as_str)
+            .collect();
+
+        if known_deps.is_empty() {
+            roots.push(m.addr.clone());
+        } else {
+            for dep in known_deps {
+                children
+                    .entry(dep.to_string())
+                    .or_default()
+                    .push(m.addr.clone());
+            }
+        }
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut tree = Vec::new();
+    for root in &roots {
+        if visited.insert(root.clone()) {
+            tree.push(build_recursive(root, &node_meta, &children, &mut visited));
+            visited.remove(root);
+        }
+    }
+    tree
 }
 
 /// Produce a serializable snapshot of the entire reactive graph.
@@ -140,6 +276,8 @@ pub fn snapshot() -> ReactiveSnapshot {
         }
     }
 
+    let derivation_tree = build_derivation_tree(&signals, &memos);
+
     ReactiveSnapshot {
         signals,
         memos,
@@ -147,6 +285,7 @@ pub fn snapshot() -> ReactiveSnapshot {
         timeline: Vec::new(),
         component_tree: serde_json::to_value(crate::component::component_tree())
             .unwrap_or(serde_json::Value::Null),
+        derivation_tree,
         task_tree: dump_reactive_graph(),
     }
 }
