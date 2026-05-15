@@ -41,6 +41,7 @@ td.addr{color:#484f58;font-size:9px}
     <span class="stat" id="dt-sigs">Signals: <b>0</b></span>
     <span class="stat" id="dt-memos">Memos: <b>0</b></span>
     <span class="stat" id="dt-scopes">Scopes: <b>0</b></span>
+    <span class="stat" id="dt-tasks">Tasks: <b>0</b></span>
     <span class="stat" id="dt-status">waiting for WASM…</span>
     <span class="stat" style="margin-left:auto;cursor:pointer;color:#f85149" onclick="window._toggleDevtools()">x Close</span>
   </div>
@@ -82,10 +83,12 @@ window._toggleDevtools = function() {
 window._dtRender = function(snap) {
   seq++;
   document.getElementById('dt-status').innerHTML = 'snap #'+seq;
-  render(snap);
   document.getElementById('dt-sigs').innerHTML = 'Signals: <b>'+snap.signals.length+'</b>';
   document.getElementById('dt-memos').innerHTML = 'Memos: <b>'+snap.memos.length+'</b>';
   document.getElementById('dt-scopes').innerHTML = 'Scopes: <b>'+(snap.scope_tree||[]).length+'</b>';
+  var totalTasks = countTasks(snap.scope_tree||[]);
+  document.getElementById('dt-tasks').innerHTML = 'Tasks: <b>'+totalTasks+'</b>';
+  render(snap);
 };
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
@@ -118,74 +121,78 @@ function render(snap) {
     '</td><td>'+m.compute_count+'</td><td '+cls+'>'+(dC>0?'+'+dC:dC||'·')+'</td><td>'+m.dependency_addrs.map(a=>esc(addrToLabel[a]||a.slice(0,8)+'…')).join(', ')+'</td></tr>';
   }).join('');
 
+  var signalMap = {};
+  for (const s of snap.signals) if (s.label) signalMap[s.addr] = {label: s.label, type: 'Signal'};
+  for (const m of snap.memos) if (m.label) signalMap[m.addr] = {label: m.label, type: 'Memo'};
+
   renderGraph(snap.signals, snap.memos);
-  renderComponents(snap.component_tree || []);
-  renderTasks(snap.scope_tree || []);
-  renderTimeline(snap.timeline || []);
+  renderComponents(snap.component_tree || [], signalMap);
 }
 
-var compId = 0;
-function renderComponents(tree) {
+function countTasks(tree) {
+  var n = 0;
+  for (var i = 0; i < tree.length; i++) {
+    n += (tree[i].tasks||[]).length;
+    if (tree[i].children) n += countTasks(tree[i].children);
+  }
+  return n;
+}
+
+var lastComponentTree = [], collapsed = {}, lastSignalMap = {};
+function renderComponents(tree, signalMap) {
+  lastComponentTree = tree;
+  lastSignalMap = signalMap || {};
   var el = document.getElementById('dt-components');
   if (!tree || !tree.length) { el.innerHTML = '<span style="color:#484f58">(no components)</span>'; return; }
-  function node(n, depth) {
-    var id = 'c'+(++compId);
-    var hasKids = n.children && n.children.length > 0;
+  function node(n, depth, path) {
+    var sigAddrs = n.signal_addrs || [];
+    var hasKids = (n.children && n.children.length > 0) || sigAddrs.length > 0;
+    var isCollapsed = collapsed[path] === true;
     var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px;margin-bottom:2px">';
-    h += '<span style="cursor:pointer;color:#8b949e;user-select:none" onclick="var e=document.getElementById(\''+id+'\');if(e){e.style.display=e.style.display===\'none\'?\'block\':\'none\';this.textContent=e.style.display===\'none\'?\'▶\':\'▼\'}">'+(hasKids?'▼':' ')+'</span> ';
+    var arrow = hasKids ? (isCollapsed ? '▶' : '▼') : ' ';
+    h += '<span class="dt-tree-toggle" data-dt-path="'+esc(path)+'" style="cursor:pointer;color:#8b949e;user-select:none">'+arrow+'</span> ';
     h += '<span style="color:#58a6ff">'+esc(n.label)+'</span>';
-    if (n.signal_addrs && n.signal_addrs.length) {
-      h += ' <span style="color:#484f58;font-size:9px">('+n.signal_addrs.length+' signals)</span>';
+    if (sigAddrs.length) {
+      h += ' <span style="color:#484f58;font-size:9px">('+sigAddrs.length+' signals)</span>';
     }
     if (hasKids) {
-      h += '<div id="'+id+'">';
-      for (var i=0;i<n.children.length;i++) h += node(n.children[i], depth+1);
+      h += '<div class="dt-tree-kids" style="display:'+(isCollapsed ? 'none' : 'block')+'">';
+      // Sub-components.
+      if (n.children) {
+        for (var i=0;i<n.children.length;i++) h += node(n.children[i], depth+1, path+'/'+n.children[i].label);
+      }
+      // Signal items under this component.
+      for (var i=0;i<sigAddrs.length;i++) {
+        var addr = sigAddrs[i];
+        var info = signalMap[addr];
+        var label = info ? info.label : (addr||'').slice(0,10)+'…';
+        var type = info ? info.type : '?';
+        var clr = type === 'Memo' ? '#3fb950' : '#58a6ff';
+        var icon = type === 'Memo' ? '◆' : '●';
+        h += '<div style="margin-left:'+((depth+1)*12)+'px;border-left:1px solid #21262d;padding-left:8px;margin-bottom:1px">';
+        h += '<span style="color:#484f58;font-size:9px">'+icon+'</span> ';
+        h += '<span style="color:#c9d1d9;font-size:10px">'+esc(label)+'</span>';
+        h += ' <span style="font-size:9px;color:'+clr+'">'+esc(type)+'</span>';
+        h += '</div>';
+      }
       h += '</div>';
     }
     h += '</div>';
     return h;
   }
-  compId = 0;
-  el.innerHTML = tree.map(function(n){return node(n,0)}).join('');
-}
-
-function renderTasks(tree) {
-  var totalTasks = 0;
-  function node(n, depth) {
-    var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px">';
-    h += '<span style="color:#58a6ff">Scope '+n.id+'</span>';
-    if (n.label) h += ' <span style="color:#c9d1d9">"'+esc(n.label)+'"</span>';
-    totalTasks += (n.tasks||[]).length;
-    for (var i=0;i<(n.tasks||[]).length;i++) {
-      var t = n.tasks[i];
-      h += '<div style="margin-left:12px;font-size:10px;color:#8b949e">task '+t.id+' ['+t.priority+'] '+(t.queued?'<span style="color:#3fb950">queued</span>':'<span style="color:#484f58">waiting</span>')+' polls:'+t.total_poll_count+'</div>';
-    }
-    if (n.children) for (var j=0;j<n.children.length;j++) h += node(n.children[j], depth+1);
-    h += '</div>';
-    return h;
-  }
-  document.getElementById('task-tree').innerHTML = tree.map(function(n){return node(n,0)}).join('') || '<span style="color:#484f58">(no tasks)</span>';
-  var tc = document.getElementById('task-count');
-  if (tc) tc.innerHTML = 'Tasks: <b>'+totalTasks+'</b>';
-}
-
-function renderTimeline(timeline) {
-  var bar = document.getElementById('timeline-bar');
-  var MAX = 60;
-  var entries = timeline.slice(-MAX);
-  bar.innerHTML = '';
-  for (var i = 0; i < MAX; i++) {
-    var tick = document.createElement('span');
-    tick.className = 'tick' + (i < entries.length ? ' active' : '');
-    if (i < entries.length) {
-      tick.title = 'seq ' + entries[i].seq + ' @ ' + entries[i].ms_since_start + 'ms';
-    }
-    bar.appendChild(tick);
+  el.innerHTML = tree.map(function(n){return node(n, 0, n.label)}).join('');
+  var toggles = el.querySelectorAll('.dt-tree-toggle');
+  for (var i = 0; i < toggles.length; i++) {
+    toggles[i].onclick = function() {
+      var path = this.getAttribute('data-dt-path');
+      if (collapsed[path]) { delete collapsed[path]; }
+      else { collapsed[path] = true; }
+      renderComponents(lastComponentTree, lastSignalMap);
+    };
   }
 }
 
 function renderGraph(signals, memos) {
-  // Build a stable key from node+edge ids — only rebuild when structure changes.
   const ids = signals.map(s=>s.addr).sort().join(',') + '|' +
     memos.map(m=>m.addr+':'+(m.dependency_addrs||[]).sort().join(',')).sort().join(',');
   if (ids === lastGraphKey) return;

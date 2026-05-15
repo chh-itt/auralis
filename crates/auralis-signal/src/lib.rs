@@ -90,3 +90,6 @@ pub use signal::{install_schedule_hook, remove_schedule_hook};
 #[doc(hidden)]
 pub use signal::{subscribe, unsubscribe};
 pub use signal::{Signal, SignalMap};
+
+#[cfg(feature = "diagnostics")]
+pub use signal::{mark_changed, take_changed_flag};

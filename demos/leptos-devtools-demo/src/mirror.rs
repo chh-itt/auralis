@@ -2,7 +2,7 @@
 //! real-time DevTools monitoring.
 //!
 //! Uses only public Leptos APIs (`Get::get`, `Effect::new`) and
-//! Auralis APIs (`Signal::new`, `set_label`, `Signal::set`).
+//! Auralis APIs (`Signal::new`, `set_label`, `Signal::set_silent`).
 //!
 //! # Usage (inside a Leptos component)
 //!
@@ -24,7 +24,7 @@ macro_rules! mirror {
         auralis_devtools::component::attach_signal(m.state_addr());
         let m2 = m.clone();
         leptos::prelude::Effect::new(move || {
-            m2.set(ls.get());
+            m2.set_silent(ls.get());
         });
         m
     }};
@@ -42,7 +42,7 @@ macro_rules! mirror_memo {
         auralis_devtools::component::attach_signal(s.state_addr());
         let s2 = s.clone();
         leptos::prelude::Effect::new(move || {
-            s2.set(lm.get());
+            s2.set_silent(lm.get());
         });
         s
     }};

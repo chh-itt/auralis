@@ -309,6 +309,32 @@ impl<T> Signal<T> {
         }
     }
 
+    /// Like [`set`](Signal::set), but skips the observer-notification
+    /// chain (`notify_schedule_observers`).  Subscriber callbacks
+    /// (memos, effects) are still enqueued, so dependent computations
+    /// stay correct.
+    ///
+    /// This is intended for mirror/bridge layers that synchronise an
+    /// external reactive runtime (Leptos, Dioxus, etc.) into Auralis.
+    /// The mirrored signal has no Auralis observers, so iterating
+    /// them on every sync is wasted work.
+    #[cfg(feature = "diagnostics")]
+    pub fn set_silent(&self, val: T)
+    where
+        T: 'static,
+    {
+        let mut state = self.state.borrow_mut();
+        state.value = val;
+        state.version = state.version.wrapping_add(1);
+        state.update_count = state.update_count.wrapping_add(1);
+        CHANGED_FLAG.with(|c| c.set(true));
+        let subs = Self::prepare_notification(&mut state);
+        drop(state);
+        if let Some(subs) = subs {
+            Self::schedule_notification(&self.state, subs);
+        }
+    }
+
     /// Internal: notify all subscribers of the given signal state.
     /// Called from the deferred callback queue and from re-entrant
     /// follow-up notifications.
@@ -942,6 +968,23 @@ pub fn add_schedule_observer_with_identity(observer: Box<dyn Fn(usize, u64)>) ->
     add_observer(ObserverFn::Identity(observer))
 }
 
+/// Returns `true` and clears the flag if any signal has been mutated
+/// since the last call.  Intended for `DevTools` poll loops that want
+/// to skip full snapshots when the reactive graph is idle.
+#[cfg(feature = "diagnostics")]
+#[must_use]
+pub fn take_changed_flag() -> bool {
+    CHANGED_FLAG.with(|c| c.replace(false))
+}
+
+/// Forces the changed flag to `true`, ensuring the next
+/// [`take_changed_flag`] call returns `true`.  Useful when opening a
+/// `DevTools` panel so the first snapshot is always taken.
+#[cfg(feature = "diagnostics")]
+pub fn mark_changed() {
+    CHANGED_FLAG.with(|c| c.set(true));
+}
+
 fn add_observer(f: ObserverFn) -> ObserverToken {
     NOTIFY_OBSERVERS.with(|cell| {
         let mut observers = cell.borrow_mut();
@@ -1003,6 +1046,15 @@ thread_local! {
     static IN_NOTIFY_OBSERVERS: Cell<bool> = const { Cell::new(false) };
 }
 
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    /// Set to `true` by any signal mutation (`set`, `set_silent`,
+    /// `update`, `bump_version`).  External consumers (e.g. DevTools
+    /// poll loops) call [`take_changed_flag`] to check and clear it,
+    /// avoiding unnecessary work when the graph is idle.
+    static CHANGED_FLAG: Cell<bool> = const { Cell::new(false) };
+}
+
 struct NotifyGuard;
 
 impl Drop for NotifyGuard {
@@ -1017,6 +1069,8 @@ impl Drop for NotifyGuard {
 /// version.  Identity-aware observers receive them; legacy
 /// (no-arg) observers are still called for backward compatibility.
 fn notify_schedule_observers(addr: usize, version: u64) {
+    #[cfg(feature = "diagnostics")]
+    CHANGED_FLAG.with(|c| c.set(true));
     if IN_NOTIFY_OBSERVERS.with(|c| c.replace(true)) {
         return; // re-entrant — skip
     }
