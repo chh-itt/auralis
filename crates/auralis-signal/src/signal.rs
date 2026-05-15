@@ -100,6 +100,9 @@ pub(crate) struct SignalState<T> {
     pub(crate) update_count: u64,
 }
 
+/// Type alias for the optional value formatter closure.
+pub(crate) type ValueFormatter<T> = Rc<RefCell<Option<Box<dyn Fn(&T) -> String>>>>;
+
 /// A reactive value container with monotonic version tracking.
 ///
 /// Every mutation increments the version, allowing change-detection
@@ -126,6 +129,9 @@ pub(crate) struct SignalState<T> {
 pub struct Signal<T> {
     pub(crate) state: Rc<RefCell<SignalState<T>>>,
     label: Rc<RefCell<Option<String>>>,
+    /// Optional closure for formatting the current value as a
+    /// debug string.  Set via [`set_value_formatter`](Signal::set_value_formatter).
+    value_formatter: ValueFormatter<T>,
 }
 
 // Without the diagnostics feature, Signal::new has no 'static bound.
@@ -148,6 +154,7 @@ impl<T> Signal<T> {
         Self {
             state,
             label: Rc::new(RefCell::new(None)),
+            value_formatter: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -170,25 +177,28 @@ impl<T: 'static> Signal<T> {
             update_count: 0,
         }));
         let label = Rc::new(RefCell::new(None));
+        let value_formatter = Rc::new(RefCell::new(None));
 
         let weak = Rc::downgrade(&state);
         let addr = Rc::as_ptr(&state) as usize;
         crate::registry::register(crate::registry::make_signal_callback(
             weak,
             Rc::clone(&label),
+            Rc::clone(&value_formatter),
             addr,
         ));
 
-        Self { state, label }
+        Self {
+            state,
+            label,
+            value_formatter: Rc::new(RefCell::new(None)),
+        }
     }
 }
 
 impl<T> Signal<T> {
     /// Create a signal **without** registering in the diagnostics
-    /// registry.  Used by [`Memo`](crate::Memo) for its internal
-    /// output signal — the memo has its own registry entry and the
-    /// internal signal would otherwise appear as a duplicate
-    /// unnamed node.
+    /// registry.
     #[must_use]
     pub(crate) fn new_untracked(val: T) -> Self {
         Self {
@@ -202,6 +212,7 @@ impl<T> Signal<T> {
                 update_count: 0,
             })),
             label: Rc::new(RefCell::new(None)),
+            value_formatter: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -615,6 +626,22 @@ impl<T> Signal<T> {
         self.label.borrow().clone()
     }
 
+    /// Install a closure that formats the current value as a debug
+    /// string for `DevTools` snapshots.
+    ///
+    /// Without this, `value_debug` in [`ReactiveNodeSnapshot`] is `None`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use auralis_signal::Signal;
+    /// let sig = Signal::new(vec![1, 2, 3]);
+    /// sig.set_value_formatter(|v| format!("[{} items]", v.len()));
+    /// ```
+    pub fn set_value_formatter(&self, f: impl Fn(&T) -> String + 'static) {
+        *self.value_formatter.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Return the current version number.
     ///
     /// The version is incremented (wrapping) on every [`set`](Signal::set)
@@ -665,6 +692,7 @@ impl<T> Clone for Signal<T> {
         Self {
             state: Rc::clone(&self.state),
             label: Rc::clone(&self.label),
+            value_formatter: Rc::clone(&self.value_formatter),
         }
     }
 }
@@ -685,7 +713,7 @@ impl<T: fmt::Debug> fmt::Debug for Signal<T> {
         ds.field("value", &state.value)
             .field("version", &state.version)
             .field("subscribers", &state.subscribers.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

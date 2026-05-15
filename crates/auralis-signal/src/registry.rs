@@ -46,6 +46,9 @@ pub struct ReactiveNodeSnapshot {
     /// Rust type name of the stored value, e.g. `"i32"` or
     /// `"alloc::vec::Vec<app::TodoItem>"`.
     pub type_name: Option<String>,
+    /// Debug representation of the current value, if a formatter
+    /// was set via `Signal::set_value_formatter`.
+    pub value_debug: Option<String>,
 }
 
 type RegistryCallback = Box<dyn Fn() -> Option<ReactiveNodeSnapshot>>;
@@ -99,11 +102,13 @@ pub fn dump_registry() -> Vec<ReactiveNodeSnapshot> {
 pub(crate) fn make_signal_callback<T: 'static>(
     weak: Weak<RefCell<SignalState<T>>>,
     label: Rc<RefCell<Option<String>>>,
+    formatter: crate::signal::ValueFormatter<T>,
     state_addr: usize,
 ) -> RegistryCallback {
     Box::new(move || {
         let state = weak.upgrade()?;
         let s = state.borrow();
+        let value_debug = formatter.borrow().as_ref().map(|f| f(&s.value));
         Some(ReactiveNodeSnapshot {
             label: label.borrow().clone(),
             node_type: "Signal",
@@ -117,6 +122,7 @@ pub(crate) fn make_signal_callback<T: 'static>(
             last_compute_us: None,
             update_count: Some(s.update_count),
             type_name: Some(std::any::type_name::<T>().to_string()),
+            value_debug,
         })
     })
 }
@@ -152,6 +158,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
             last_compute_us: Some(last_compute_us.get()),
             update_count: None,
             type_name: Some(std::any::type_name::<T>().to_string()),
+            value_debug: None,
         })
     })
 }

@@ -29,16 +29,23 @@ pub fn App() -> impl IntoView {
     });
 
     // ── Auralis Mirrors ─────────────────────────────────────────
-    // Base signals.
     let mir_items = crate::mirror!(items, "items");
+    mir_items.set_value_formatter(|v| format!("{} todos", v.len()));
     let _mir_filter = crate::mirror!(filter, "filter");
+    _mir_filter.set_value_formatter(|v| format!("{v:?}"));
     let _mir_add_count = crate::mirror!(add_count, "add_count");
+    _mir_add_count.set_value_formatter(|v| format!("{v}"));
 
-    // Derived memos with deps → edges in the DevTools graph.
+    // Derived memos.
     let _mir_total = crate::mirror_memo_deps!(total_count, "total_count", mir_items.clone());
     let _mir_active = crate::mirror_memo_deps!(active_count, "active_count", mir_items.clone());
     let _mir_completed = crate::mirror_memo_deps!(completed_count, "completed_count", mir_items.clone());
     let _mir_rate = crate::mirror_memo!(completion_rate, "completion_rate");
+    // Set value formatters on all memo mirrors.
+    _mir_total.set_value_formatter(|v| format!("{v}"));
+    _mir_active.set_value_formatter(|v| format!("{v}"));
+    _mir_completed.set_value_formatter(|v| format!("{v}"));
+    _mir_rate.set_value_formatter(|v| format!("{v:.2}"));
 
     // ── Handlers ─────────────────────────────────────────────────
     let add_todo = move |_| {

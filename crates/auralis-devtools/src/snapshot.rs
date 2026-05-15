@@ -24,20 +24,14 @@ pub struct ReactiveSnapshot {
 /// A serializable signal entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct SignalEntry {
-    /// Label set via `Signal::set_label()`, if any.
     pub label: Option<String>,
-    /// Current version number.
     pub version: u64,
-    /// Total mutation count (set/update/bump).
     pub update_count: u64,
-    /// Number of active subscriber callbacks.
     pub subscriber_count: usize,
-    /// Rust type name of the stored value.
     pub type_name: String,
-    /// Addresses of memos that subscribe to this signal
-    /// (reverse dependency graph).  Always present, may be empty.
+    /// Debug representation of the current value (from `set_value_formatter`).
+    pub value_debug: Option<String>,
     pub subscribed_by: Vec<String>,
-    /// Opaque identity.
     pub addr: String,
 }
 
@@ -61,6 +55,8 @@ pub struct MemoEntry {
     pub dependency_addrs: Vec<String>,
     /// Microseconds spent in the most recent successful recomputation.
     pub last_compute_us: Option<u64>,
+    /// Rust type name of the computed value.
+    pub type_name: String,
     /// Opaque identity.
     pub addr: String,
 }
@@ -100,7 +96,8 @@ pub fn snapshot() -> ReactiveSnapshot {
                     update_count: n.update_count.unwrap_or(0),
                     subscriber_count: n.subscriber_count,
                     type_name: n.type_name.clone().unwrap_or_default(),
-                    subscribed_by: Vec::new(), // filled below
+                    value_debug: n.value_debug.clone(),
+                    subscribed_by: Vec::new(),
                     addr: fmt_addr(n.state_addr),
                 });
             }
@@ -126,6 +123,7 @@ pub fn snapshot() -> ReactiveSnapshot {
                     dependency_count: n.dependency_count.unwrap_or(0),
                     dependency_addrs: dep_addrs,
                     last_compute_us: n.last_compute_us,
+                    type_name: n.type_name.clone().unwrap_or_default(),
                     addr: memo_addr,
                 });
             }
