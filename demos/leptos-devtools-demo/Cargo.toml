@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "leptos-devtools-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+auralis-signal = { path = "../../crates/auralis-signal", features = ["diagnostics"] }
+auralis-task = { path = "../../crates/auralis-task", features = ["debug"] }
+auralis-devtools = { path = "../../crates/auralis-devtools" }
+leptos = { version = "0.8", features = ["csr"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"

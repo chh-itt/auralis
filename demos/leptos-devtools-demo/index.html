@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auralis DevTools — Leptos Demo</title>
+<link data-trunk rel="rust" data-wasm-opt="0">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,monospace;background:#0d1117;color:#c9d1d9}
+#app{max-width:600px;margin:0 auto;padding:20px}
+#devtools-toggle{position:fixed;bottom:8px;right:8px;z-index:100;padding:6px 12px;background:#1f6feb;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px}
+#devtools{display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:#0d1117ee;z-index:99;overflow:auto;flex-direction:column}
+#devtools.open{display:flex}
+.dt-header{background:#161b22;padding:10px 20px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #30363d;flex-shrink:0}
+.dt-header h1{font-size:16px;color:#58a6ff}
+.dt-header .stat{font-size:12px;color:#8b949e}
+.dt-header .stat b{color:#c9d1d9}
+.dt-panels{display:flex;flex:1;overflow:hidden}
+.dt-panel{flex:1;overflow-y:auto;padding:12px;border-right:1px solid #30363d;min-width:0}
+.dt-panel:last-child{border-right:none}
+.dt-panel h2{font-size:13px;color:#58a6ff;margin-bottom:8px;position:sticky;top:0;background:#0d1117ee;padding:4px 0;z-index:1}
+table{width:100%;border-collapse:collapse;font-size:10px}
+th,td{padding:2px 5px;text-align:left;border-bottom:1px solid #21262d;white-space:nowrap}
+th{color:#8b949e;font-weight:normal}
+td.addr{color:#484f58;font-size:9px}
+#dt-graph{width:100%;height:100%}
+.graph-sig{fill:#58a6ff;stroke:#0d1117;stroke-width:1}
+.graph-memo{fill:#3fb950;stroke:#0d1117;stroke-width:1}
+.graph-edge{stroke:#30363d;stroke-width:1;fill:none;stroke-opacity:0.6}
+.graph-label{fill:#c9d1d9;font-size:8px;pointer-events:none;text-anchor:middle}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<button id="devtools-toggle" onclick="window._toggleDevtools()">Auralis DevTools</button>
+
+<div id="devtools">
+  <div class="dt-header">
+    <h1>Auralis DevTools</h1>
+    <span class="stat" id="dt-sigs">Signals: <b>0</b></span>
+    <span class="stat" id="dt-memos">Memos: <b>0</b></span>
+    <span class="stat" id="dt-scopes">Scopes: <b>0</b></span>
+    <span class="stat" id="dt-status">waiting for WASM…</span>
+    <span class="stat" style="margin-left:auto;cursor:pointer;color:#f85149" onclick="window._toggleDevtools()">x Close</span>
+  </div>
+  <div class="dt-panels">
+    <div class="dt-panel" style="max-width:300px">
+      <h2>Signals</h2>
+      <table>
+        <thead><tr><th>Label</th><th>Ver</th><th>Δ</th><th>Subs</th><th>Watched By</th></tr></thead>
+        <tbody id="dt-sigs-body"></tbody>
+      </table>
+    </div>
+    <div class="dt-panel" style="max-width:350px">
+      <h2>Memos / Derived</h2>
+      <table>
+        <thead><tr><th>Label</th><th>Ver</th><th>Δ</th><th>Dirty</th><th>Computed</th><th>Δcp</th><th>Deps</th></tr></thead>
+        <tbody id="dt-memos-body"></tbody>
+      </table>
+    </div>
+    <div class="dt-panel">
+      <h2>Dependency Graph</h2>
+      <svg id="dt-graph"></svg>
+    </div>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+let addrToLabel = {}, seq = 0, lastGraphKey = '', lastVers = {}, lastComputed = {};
+
+window._toggleDevtools = function() {
+  const dev = document.getElementById('devtools');
+  dev.className = dev.className === 'open' ? '' : 'open';
+};
+
+window._dtRender = function(json) {
+  seq++;
+  document.getElementById('dt-status').innerHTML = 'snap #'+seq;
+  const snap = JSON.parse(json);
+  render(snap);
+  document.getElementById('dt-sigs').innerHTML = 'Signals: <b>'+snap.signals.length+'</b>';
+  document.getElementById('dt-memos').innerHTML = 'Memos: <b>'+snap.memos.length+'</b>';
+  document.getElementById('dt-scopes').innerHTML = 'Scopes: <b>'+(snap.scope_tree||[]).length+'</b>';
+};
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
+function render(snap) {
+  addrToLabel = {};
+  for (const s of snap.signals) if (s.label) addrToLabel[s.addr] = s.label;
+  for (const m of snap.memos) if (m.label) addrToLabel[m.addr] = m.label;
+
+  document.getElementById('dt-sigs-body').innerHTML = snap.signals.map(s => {
+    const prev = lastVers[s.addr] || s.version;
+    const delta = s.version - prev;
+    const cls = delta > 0 ? 'style="color:#3fb950;font-weight:bold"' : '';
+    const dStr = delta > 0 ? '+'+delta : (delta < 0 ? ''+delta : '·');
+    lastVers[s.addr] = s.version;
+    return '<tr><td>'+esc(s.label||'(unnamed)')+'</td><td>'+s.version+'</td><td '+cls+'>'+dStr+'</td><td>'+s.subscriber_count+
+    '</td><td>'+(s.subscribed_by||[]).map(a=>esc(addrToLabel[a]||a.slice(0,8)+'…')).join(', ')+'</td></tr>';
+  }).join('');
+
+  document.getElementById('dt-memos-body').innerHTML = snap.memos.map(m => {
+    const prevV = lastVers[m.addr] || m.version;
+    const prevC = lastComputed[m.addr] || m.compute_count;
+    const dV = m.version - prevV, dC = m.compute_count - prevC;
+    const cls = (dC > 0 || dV > 0) ? 'style="color:#3fb950;font-weight:bold"' : '';
+    lastVers[m.addr] = m.version;
+    lastComputed[m.addr] = m.compute_count;
+    return '<tr><td>'+esc(m.label||'(unnamed)')+'</td><td>'+m.version+'</td><td '+cls+'>'+(dV>0?'+'+dV:dV||'·')+'</td><td>'+(m.is_dirty?'dirty':'clean')+
+    '</td><td>'+m.compute_count+'</td><td '+cls+'>'+(dC>0?'+'+dC:dC||'·')+'</td><td>'+m.dependency_addrs.map(a=>esc(addrToLabel[a]||a.slice(0,8)+'…')).join(', ')+'</td></tr>';
+  }).join('');
+
+  renderGraph(snap.signals, snap.memos);
+}
+
+function renderGraph(signals, memos) {
+  // Build a stable key from node+edge ids — only rebuild when structure changes.
+  const ids = signals.map(s=>s.addr).sort().join(',') + '|' +
+    memos.map(m=>m.addr+':'+(m.dependency_addrs||[]).sort().join(',')).sort().join(',');
+  if (ids === lastGraphKey) return;
+  lastGraphKey = ids;
+
+  const svg = d3.select('#dt-graph');
+  const W = svg.node().clientWidth||400, H = svg.node().clientHeight||400;
+  const nodes=[], edges=[], nm={};
+  for (const s of signals) {
+    const l=addrToLabel[s.addr]; if(!l) continue;
+    nodes.push({id:s.addr,label:l,type:'signal'}); nm[s.addr]=nodes[nodes.length-1];
+  }
+  for (const m of memos) {
+    const l=addrToLabel[m.addr]||m.label||m.addr.slice(0,8)+'…';
+    nodes.push({id:m.addr,label:l,type:'memo'}); nm[m.addr]=nodes[nodes.length-1];
+    for (const d of m.dependency_addrs) if(nm[d]) edges.push({source:d,target:m.addr});
+  }
+  svg.selectAll('*').remove();
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.2,3]).on('zoom',e=>g.attr('transform',e.transform)));
+  const sim = d3.forceSimulation(nodes)
+    .force('link',d3.forceLink(edges).id(d=>d.id).distance(60))
+    .force('charge',d3.forceManyBody().strength(-150))
+    .force('center',d3.forceCenter(W/2,H/2))
+    .force('collision',d3.forceCollide(12));
+  const link=g.selectAll('line').data(edges).join('line').attr('class','graph-edge');
+  const node=g.selectAll('g').data(nodes).join('g').attr('cursor','grab')
+    .call(d3.drag()
+      .on('start',(e,d)=>{if(!e.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;})
+      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;})
+      .on('end',(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}));
+  node.append('circle').attr('r',d=>d.type==='signal'?5:6)
+    .attr('class',d=>d.type==='signal'?'graph-sig':'graph-memo');
+  node.append('text').attr('dy',-8).attr('class','graph-label').text(d=>d.label);
+  sim.on('tick',()=>{
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+        .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('transform',d=>'translate('+d.x+','+d.y+')');
+  });
+}
+</script>
+</body>
+</html>
