@@ -95,11 +95,9 @@ pub(crate) struct SignalState<T> {
     /// without scheduling additional notifications.
     dirty: bool,
     /// `true` while a notification is actively invoking callbacks.
-    /// Prevents re-entrant `set` from scheduling a new notification
-    /// that would be immediately invoked synchronously (infinite loop).
-    /// When a callback calls `set` on this signal, the notification
-    /// closure detects the stale version at the end and re-schedules.
     notifying: bool,
+    /// Number of times this signal has been mutated (set/update/bump).
+    pub(crate) update_count: u64,
 }
 
 /// A reactive value container with monotonic version tracking.
@@ -145,6 +143,7 @@ impl<T> Signal<T> {
             subscribers: Vec::new(),
             dirty: false,
             notifying: false,
+            update_count: 0,
         }));
         Self {
             state,
@@ -168,6 +167,7 @@ impl<T: 'static> Signal<T> {
             subscribers: Vec::new(),
             dirty: false,
             notifying: false,
+            update_count: 0,
         }));
         let label = Rc::new(RefCell::new(None));
 
@@ -199,6 +199,7 @@ impl<T> Signal<T> {
                 subscribers: Vec::new(),
                 dirty: false,
                 notifying: false,
+                update_count: 0,
             })),
             label: Rc::new(RefCell::new(None)),
         }
@@ -285,7 +286,10 @@ impl<T> Signal<T> {
         let mut state = self.state.borrow_mut();
         state.value = val;
         state.version = state.version.wrapping_add(1);
-        notify_schedule_observers();
+        state.update_count = state.update_count.wrapping_add(1);
+        let addr = Rc::as_ptr(&self.state) as usize;
+        let ver = state.version;
+        notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -449,7 +453,10 @@ impl<T> Signal<T> {
         let mut state = self.state.borrow_mut();
         f(&mut state.value);
         state.version = state.version.wrapping_add(1);
-        notify_schedule_observers();
+        state.update_count = state.update_count.wrapping_add(1);
+        let addr = Rc::as_ptr(&self.state) as usize;
+        let ver = state.version;
+        notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -641,7 +648,10 @@ impl<T> Signal<T> {
     {
         let mut state = self.state.borrow_mut();
         state.version = state.version.wrapping_add(1);
-        notify_schedule_observers();
+        state.update_count = state.update_count.wrapping_add(1);
+        let addr = Rc::as_ptr(&self.state) as usize;
+        let ver = state.version;
+        notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
         if let Some(subs) = subs {
@@ -822,11 +832,16 @@ pub struct ObserverToken {
     generation: u64,
 }
 
+enum ObserverFn {
+    /// Legacy no-arg observer.
+    Legacy(Box<dyn Fn()>),
+    /// Identity-aware observer: receives the mutated signal's
+    /// state_addr and new version.
+    Identity(Box<dyn Fn(usize, u64)>),
+}
+
 struct ObserverSlot {
-    observer: Option<Box<dyn Fn()>>,
-    /// Incremented (wrapping) every time this slot is reused.
-    /// A stale [`ObserverToken`] whose generation doesn't match
-    /// is silently ignored by [`remove_schedule_observer`].
+    observer: Option<ObserverFn>,
     generation: u64,
 }
 
@@ -888,29 +903,33 @@ pub fn remove_schedule_hook() {
 /// ```
 #[must_use]
 pub fn add_schedule_observer(observer: Box<dyn Fn()>) -> ObserverToken {
+    add_observer(ObserverFn::Legacy(observer))
+}
+
+/// Like [`add_schedule_observer`], but the observer receives the
+/// mutated signal's `state_addr` and new version number.
+pub fn add_schedule_observer_with_identity(
+    observer: Box<dyn Fn(usize, u64)>,
+) -> ObserverToken {
+    add_observer(ObserverFn::Identity(observer))
+}
+
+fn add_observer(f: ObserverFn) -> ObserverToken {
     NOTIFY_OBSERVERS.with(|cell| {
         let mut observers = cell.borrow_mut();
-        // Reuse a freed slot if available (preserving the bumped generation).
         for (i, slot) in observers.iter_mut().enumerate() {
             if slot.observer.is_none() {
                 let gen = slot.generation;
-                slot.observer = Some(observer);
-                return ObserverToken {
-                    index: i,
-                    generation: gen,
-                };
+                slot.observer = Some(f);
+                return ObserverToken { index: i, generation: gen };
             }
         }
         let idx = observers.len();
-        let gen = 0;
         observers.push(ObserverSlot {
-            observer: Some(observer),
-            generation: gen,
+            observer: Some(f),
+            generation: 0,
         });
-        ObserverToken {
-            index: idx,
-            generation: gen,
-        }
+        ObserverToken { index: idx, generation: 0 }
     })
 }
 
@@ -958,29 +977,32 @@ impl Drop for NotifyGuard {
     }
 }
 
-/// Notify all passive schedule-observer hooks.  Called from every
-/// signal mutation path (*before* subscriber notification routing)
-/// so `DevTools` can observe every change, even on signals with no
-/// current subscribers.
+/// Notify all passive schedule-observer hooks.
 ///
-/// Re-entrant calls (e.g. an observer callback that calls
-/// [`Signal::set`](crate::Signal::set) on another signal) are
-/// silently ignored to avoid a `RefCell` borrow panic.
-fn notify_schedule_observers() {
+/// `addr` and `version` are the mutated signal's identity and new
+/// version.  Identity-aware observers receive them; legacy
+/// (no-arg) observers are still called for backward compatibility.
+fn notify_schedule_observers(addr: usize, version: u64) {
     if IN_NOTIFY_OBSERVERS.with(|c| c.replace(true)) {
         return; // re-entrant — skip
     }
     let _guard = NotifyGuard;
 
-    // Each observer is individually isolated — a panic in one
-    // observer does not prevent the others from firing (matching
-    // the executor's per-callback isolation in flush step 2).
+    // Dispatch to all observers with identity info.
     NOTIFY_OBSERVERS.with(|cell| {
         for slot in cell.borrow().iter() {
-            if let Some(ref observer) = slot.observer {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    observer();
-                }));
+            match &slot.observer {
+                Some(ObserverFn::Legacy(obs)) => {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        obs();
+                    }));
+                }
+                Some(ObserverFn::Identity(obs)) => {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        obs(addr, version);
+                    }));
+                }
+                None => {}
             }
         }
     });

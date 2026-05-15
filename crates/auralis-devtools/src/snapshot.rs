@@ -28,8 +28,12 @@ pub struct SignalEntry {
     pub label: Option<String>,
     /// Current version number.
     pub version: u64,
+    /// Total mutation count (set/update/bump).
+    pub update_count: u64,
     /// Number of active subscriber callbacks.
     pub subscriber_count: usize,
+    /// Rust type name of the stored value.
+    pub type_name: String,
     /// Addresses of memos that subscribe to this signal
     /// (reverse dependency graph).  Always present, may be empty.
     pub subscribed_by: Vec<String>,
@@ -93,7 +97,9 @@ pub fn snapshot() -> ReactiveSnapshot {
                 signals.push(SignalEntry {
                     label: n.label.clone(),
                     version: n.version,
+                    update_count: n.update_count.unwrap_or(0),
                     subscriber_count: n.subscriber_count,
+                    type_name: n.type_name.clone().unwrap_or_default(),
                     subscribed_by: Vec::new(), // filled below
                     addr: fmt_addr(n.state_addr),
                 });

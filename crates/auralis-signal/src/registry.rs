@@ -40,6 +40,12 @@ pub struct ReactiveNodeSnapshot {
     /// Microseconds spent in the most recent successful recomputation
     /// (`None` for signals).
     pub last_compute_us: Option<u64>,
+    /// Total number of times the signal has been mutated
+    /// (`None` for memos — use `compute_count` instead).
+    pub update_count: Option<u64>,
+    /// Rust type name of the stored value, e.g. `"i32"` or
+    /// `"alloc::vec::Vec<app::TodoItem>"`.
+    pub type_name: Option<String>,
 }
 
 type RegistryCallback = Box<dyn Fn() -> Option<ReactiveNodeSnapshot>>;
@@ -109,6 +115,8 @@ pub(crate) fn make_signal_callback<T: 'static>(
             dependency_count: None,
             dependency_addrs: None,
             last_compute_us: None,
+            update_count: Some(s.update_count),
+            type_name: Some(std::any::type_name::<T>().to_string()),
         })
     })
 }
@@ -142,6 +150,8 @@ pub(crate) fn make_memo_callback<T: 'static>(
             dependency_count: Some(dep_count),
             dependency_addrs: Some(dep_addrs),
             last_compute_us: Some(last_compute_us.get()),
+            update_count: None,
+            type_name: Some(std::any::type_name::<T>().to_string()),
         })
     })
 }

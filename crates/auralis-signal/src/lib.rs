@@ -81,7 +81,10 @@ macro_rules! memo {
 pub use batch::{batch, in_batch};
 pub use future::{FilterChangedFuture, MapChangedFuture, SignalChangedFuture};
 pub use memo::Memo;
-pub use signal::{add_schedule_observer, remove_schedule_observer, ObserverToken};
+pub use signal::{
+    add_schedule_observer, add_schedule_observer_with_identity, remove_schedule_observer,
+    ObserverToken,
+};
 #[doc(hidden)]
 pub use signal::{install_schedule_hook, remove_schedule_hook};
 #[doc(hidden)]

@@ -29,14 +29,11 @@ pub fn serve() {
         send_snapshot(&mut ws, &timeline);
 
         let rx = change_stream();
-        let mut last = rx.current_seq();
         loop {
             let _ = rx.wait_timeout(Duration::from_millis(200));
-            let current = rx.current_seq();
-            if current != last {
-                timeline.record(current);
+            if let Some(seq) = rx.drain_latest_seq() {
+                timeline.record(seq);
                 send_snapshot(&mut ws, &timeline);
-                last = current;
             }
         }
     }
