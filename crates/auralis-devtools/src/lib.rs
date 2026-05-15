@@ -23,6 +23,7 @@
 #![warn(missing_docs, clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod component;
 pub mod diff;
 mod snapshot;
 pub mod stream;

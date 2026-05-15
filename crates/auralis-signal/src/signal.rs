@@ -225,7 +225,8 @@ impl<T> Signal<T> {
     /// is the `Rc` allocation address cast to `usize` — safe because
     /// `Signal<T>` is `!Send + !Sync` (the `Rc` can never migrate to
     /// another thread, so the address is a stable identity).
-    pub(crate) fn state_addr(&self) -> usize {
+    #[must_use]
+    pub fn state_addr(&self) -> usize {
         Rc::as_ptr(&self.state) as usize
     }
 

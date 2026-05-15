@@ -17,6 +17,8 @@ pub struct ReactiveSnapshot {
     /// standalone `snapshot()` calls; populated by long-lived
     /// servers that track a `Timeline`.
     pub timeline: Vec<crate::timeline::TimelineEntry>,
+    /// Optional component tree (set by host frameworks like Leptos).
+    pub component_tree: serde_json::Value,
     /// The formatted task tree (text), kept for backward compatibility.
     pub task_tree: String,
 }
@@ -143,6 +145,8 @@ pub fn snapshot() -> ReactiveSnapshot {
         memos,
         scope_tree: scope_tree(),
         timeline: Vec::new(),
+        component_tree: serde_json::to_value(crate::component::component_tree())
+            .unwrap_or(serde_json::Value::Null),
         task_tree: dump_reactive_graph(),
     }
 }

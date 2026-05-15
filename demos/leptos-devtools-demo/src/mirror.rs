@@ -21,6 +21,7 @@ macro_rules! mirror {
         let ls = $leptos_sig;
         let m = auralis_signal::Signal::new(ls.get_untracked());
         m.set_label($label);
+        auralis_devtools::component::attach_signal(m.state_addr());
         let m2 = m.clone();
         leptos::prelude::Effect::new(move || {
             m2.set(ls.get());
@@ -38,6 +39,7 @@ macro_rules! mirror_memo {
         let lm = $leptos_memo;
         let s = auralis_signal::Signal::new(lm.get_untracked());
         s.set_label($label);
+        auralis_devtools::component::attach_signal(s.state_addr());
         let s2 = s.clone();
         leptos::prelude::Effect::new(move || {
             s2.set(lm.get());
@@ -71,6 +73,7 @@ macro_rules! mirror_memo_deps {
             lm.get_untracked()
         });
         a_memo.set_label($label);
+        auralis_devtools::component::attach_signal(a_memo.state_addr());
         let am = a_memo.clone();
         leptos::prelude::Effect::new(move || {
             let _ = lm.get();

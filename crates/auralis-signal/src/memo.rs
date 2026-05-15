@@ -248,6 +248,13 @@ impl<T: Clone + 'static> Memo<T> {
         self.dirty.get()
     }
 
+    /// Return the opaque address of this memo's internal signal.
+    /// Useful for associating the memo with a component in `DevTools`.
+    #[must_use]
+    pub fn state_addr(&self) -> usize {
+        self.signal.state_addr()
+    }
+
     /// Return the number of successful recomputations so far.
     ///
     /// Includes the initial compute performed during [`new`](Memo::new).
@@ -285,6 +292,12 @@ impl<T: Clone + 'static> Memo<T> {
     #[must_use]
     pub fn label(&self) -> Option<String> {
         self.label.borrow().clone()
+    }
+
+    /// Install a closure that formats the current computed value.
+    /// Delegates to the internal signal's formatter.
+    pub fn set_value_formatter(&self, f: impl Fn(&T) -> String + 'static) {
+        self.signal.set_value_formatter(f);
     }
 
     // ------------------------------------------------------------------

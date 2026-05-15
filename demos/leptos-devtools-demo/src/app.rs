@@ -1,4 +1,5 @@
-//! Leptos Todo Dashboard — every signal/memo mirrored into Auralis.
+//! Leptos Todo Dashboard — split into 3 components for DevTools
+//! component-tree demonstration.
 
 use leptos::prelude::*;
 
@@ -9,11 +10,48 @@ struct TodoItem { id: u64, text: String, done: bool }
 enum Filter { All, Active, Completed }
 
 #[component]
-pub fn App() -> impl IntoView {
-    let (items, set_items) = signal(Vec::<TodoItem>::new());
-    let (filter, set_filter) = signal(Filter::All);
-    let (add_count, set_add_count) = signal(0u64);
+fn TodoInput(
+    set_items: WriteSignal<Vec<TodoItem>>,
+    add_count: ReadSignal<u64>,
+    set_add_count: WriteSignal<u64>,
+) -> impl IntoView {
+    let _guard = auralis_devtools::component::ComponentGuard::enter("TodoInput");
     let (input_text, set_input_text) = signal(String::new());
+
+    let _mir_input = crate::mirror!(input_text, "input_text");
+    let _mir_add = crate::mirror!(add_count, "add_count");
+    _mir_input.set_value_formatter(|v| format!("{v:?}"));
+    _mir_add.set_value_formatter(|v| format!("{v}"));
+
+    let add_todo = move |_| {
+        let text = input_text.get().trim().to_string();
+        if !text.is_empty() {
+            set_items.update(|v| v.push(TodoItem { id: add_count.get(), text, done: false }));
+            set_add_count.update(|v| *v += 1);
+            set_input_text.set(String::new());
+        }
+    };
+
+    view! {
+        <div style:display="flex" style:gap="8px" style:margin-bottom="12px">
+            <input type="text" placeholder="Add a todo…" prop:value=input_text
+                style:flex="1" style:padding="6px 10px" style:background="#0d1117"
+                style:border="1px solid #30363d" style:color="#c9d1d9" style:border-radius="4px" style:font-size="14px"
+                on:input=move |e| set_input_text.set(event_target_value(&e)) />
+            <button style:padding="6px 16px" style:background="#238636" style:color="white" style:border="none"
+                style:border-radius="4px" style:cursor="pointer" style:font-size="14px"
+                on:click=add_todo>Add</button>
+        </div>
+    }
+}
+
+#[component]
+fn TodoList(
+    items: ReadSignal<Vec<TodoItem>>,
+    set_items: WriteSignal<Vec<TodoItem>>,
+) -> impl IntoView {
+    let _guard = auralis_devtools::component::ComponentGuard::enter("TodoList");
+    let (filter, set_filter) = signal(Filter::All);
 
     let filtered_items = Memo::new(move |_| match filter.get() {
         Filter::All => items.get(),
@@ -28,40 +66,26 @@ pub fn App() -> impl IntoView {
         if n > 0 { completed_count.get() as f64 / n as f64 } else { 0.0 }
     });
 
-    // ── Auralis Mirrors ─────────────────────────────────────────
     let mir_items = crate::mirror!(items, "items");
     mir_items.set_value_formatter(|v| format!("{} todos", v.len()));
     let _mir_filter = crate::mirror!(filter, "filter");
     _mir_filter.set_value_formatter(|v| format!("{v:?}"));
-    let _mir_add_count = crate::mirror!(add_count, "add_count");
-    _mir_add_count.set_value_formatter(|v| format!("{v}"));
-
-    // Derived memos.
     let _mir_total = crate::mirror_memo_deps!(total_count, "total_count", mir_items.clone());
     let _mir_active = crate::mirror_memo_deps!(active_count, "active_count", mir_items.clone());
     let _mir_completed = crate::mirror_memo_deps!(completed_count, "completed_count", mir_items.clone());
     let _mir_rate = crate::mirror_memo!(completion_rate, "completion_rate");
-    // Set value formatters on all memo mirrors.
     _mir_total.set_value_formatter(|v| format!("{v}"));
     _mir_active.set_value_formatter(|v| format!("{v}"));
     _mir_completed.set_value_formatter(|v| format!("{v}"));
     _mir_rate.set_value_formatter(|v| format!("{v:.2}"));
 
-    // ── Handlers ─────────────────────────────────────────────────
-    let add_todo = move |_| {
-        let text = input_text.get().trim().to_string();
-        if !text.is_empty() {
-            set_items.update(|v| v.push(TodoItem { id: add_count.get(), text, done: false }));
-            set_add_count.update(|v| *v += 1);
-            set_input_text.set(String::new());
-        }
-    };
     let toggle = move |id: u64| {
         set_items.update(move |v| { if let Some(t) = v.iter_mut().find(|t| t.id == id) { t.done = !t.done; } });
     };
     let remove = move |id: u64| {
         set_items.update(move |v| v.retain(|t| t.id != id));
     };
+
     let filter_btns = [Filter::All, Filter::Active, Filter::Completed].iter().map(|&f| {
         let name = match f { Filter::All => "All", Filter::Active => "Active", Filter::Completed => "Completed" };
         let active = move || filter.get() == f;
@@ -90,40 +114,36 @@ pub fn App() -> impl IntoView {
         }
     }).collect::<Vec<_>>();
 
-    // ── View ─────────────────────────────────────────────────────
+    view! {
+        <div style:display="flex" style:gap="20px" style:margin-bottom="16px" style:font-size="13px" style:color="#c9d1d9">
+            <div>Total: <b>{move || total_count.get()}</b></div>
+            <div>Active: <b>{move || active_count.get()}</b></div>
+            <div>Completed: <b>{move || completed_count.get()}</b></div>
+            <div>Rate: <b>{move || format!("{:.0}%", completion_rate.get() * 100.0)}</b></div>
+        </div>
+        <div style:display="flex" style:gap="4px" style:margin-bottom="12px">{filter_btns}</div>
+        <div style:margin-bottom="12px">{todo_items}</div>
+        <button style:padding="4px 12px" style:background="#161b22" style:border="1px solid #30363d"
+            style:color="#8b949e" style:border-radius="4px" style:cursor="pointer" style:font-size="12px"
+            on:click=move |_| set_items.update(|v| v.retain(|t| !t.done))
+        >Clear completed</button>
+    }
+}
+
+#[component]
+pub fn App() -> impl IntoView {
+    let _guard = auralis_devtools::component::ComponentGuard::enter("App");
+    let (items, set_items) = signal(Vec::<TodoItem>::new());
+    let (add_count, set_add_count) = signal(0u64);
+
     view! {
         <div style:max-width="600px" style:margin="0 auto" style:padding="20px" style:font-family="system-ui">
             <h1 style:color="#58a6ff" style:margin-bottom="16px">Leptos Todo Dashboard</h1>
             <p style:color="#8b949e" style:font-size="12px" style:margin-bottom="20px">
                 Every signal/memo is mirrored into Auralis. Open the DevTools panel (bottom-right) to inspect.
             </p>
-
-            <div style:display="flex" style:gap="20px" style:margin-bottom="16px" style:font-size="13px" style:color="#c9d1d9">
-                <div>Total: <b>{move || total_count.get()}</b></div>
-                <div>Active: <b>{move || active_count.get()}</b></div>
-                <div>Completed: <b>{move || completed_count.get()}</b></div>
-                <div>Rate: <b>{move || format!("{:.0}%", completion_rate.get() * 100.0)}</b></div>
-            </div>
-
-            <div style:display="flex" style:gap="8px" style:margin-bottom="12px">
-                <input type="text" placeholder="Add a todo…" prop:value=input_text
-                    style:flex="1" style:padding="6px 10px" style:background="#0d1117"
-                    style:border="1px solid #30363d" style:color="#c9d1d9" style:border-radius="4px" style:font-size="14px"
-                    on:input=move |e| set_input_text.set(event_target_value(&e)) />
-                <button style:padding="6px 16px" style:background="#238636" style:color="white" style:border="none"
-                    style:border-radius="4px" style:cursor="pointer" style:font-size="14px"
-                    on:click=add_todo>Add</button>
-            </div>
-
-            <div style:display="flex" style:gap="4px" style:margin-bottom="12px">{filter_btns}</div>
-            <div style:margin-bottom="12px">{todo_items}</div>
-
-            <button style:padding="4px 12px" style:background="#161b22" style:border="1px solid #30363d"
-                style:color="#8b949e" style:border-radius="4px" style:cursor="pointer" style:font-size="12px"
-                on:click=move |_| set_items.update(|v| v.retain(|t| !t.done))
-                >Clear completed</button>
-
-            <p style:color="#484f58" style:font-size="11px" style:margin-top="12px">Actions: {move || add_count.get()}</p>
+            <TodoInput set_items=set_items add_count=add_count set_add_count=set_add_count />
+            <TodoList items=items set_items=set_items />
         </div>
     }
 }
