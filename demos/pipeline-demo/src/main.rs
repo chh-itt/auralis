@@ -23,6 +23,9 @@ use auralis_task::init_flush_scheduler;
 use auralis_task::timer;
 use auralis_task::TaskScope;
 
+#[cfg(feature = "web")]
+mod web_server;
+
 // ---------------------------------------------------------------------------
 // Scheduler: defers flush callbacks — drained by the main loop.
 // This avoids re-entrant flush_instance calls that occur with a
@@ -323,7 +326,7 @@ fn main() {
 
     // ---- DevTools integration ----
     let args: Vec<String> = std::env::args().collect();
-    let devtools_mode = args.get(1).map(String::as_str) == Some("devtools");
+    let mode = args.get(1).map(String::as_str);
 
     let snap = auralis_devtools::snapshot();
     println!("=== Pipeline Started ===");
@@ -331,44 +334,48 @@ fn main() {
         "{} signals, {} memos, {} scopes",
         snap.signals.len(),
         snap.memos.len(),
-        3 // Pipeline, SensorSimulator, Monitoring
+        3
     );
     println!();
 
-    if devtools_mode {
-        // Run with periodic devtools snapshots
-        let dev_scope = TaskScope::new_child(&root);
-        dev_scope.set_label("Devtools");
-        dev_scope.spawn(async move {
-            loop {
-                timer::sleep(Duration::from_secs(3)).await;
-                let snap = auralis_devtools::snapshot();
-                let json = serde_json::to_string_pretty(&snap).unwrap();
-                println!("=== DevTools Snapshot ===");
-                println!("{json}");
-                let _ = std::io::stdout().flush();
-            }
-        });
+    match mode {
+        #[cfg(feature = "web")]
+        Some("web") => {
+            // WebSocket server — blocks indefinitely.
+            web_server::serve();
+        }
+        Some("devtools") => {
+            let dev_scope = TaskScope::new_child(&root);
+            dev_scope.set_label("Devtools");
+            dev_scope.spawn(async move {
+                loop {
+                    timer::sleep(Duration::from_secs(3)).await;
+                    let snap = auralis_devtools::snapshot();
+                    let json = serde_json::to_string_pretty(&snap).unwrap();
+                    println!("=== DevTools Snapshot ===");
+                    println!("{json}");
+                    let _ = std::io::stdout().flush();
+                }
+            });
+            run_loop(18, &scheduler);
+        }
+        _ => {
+            run_loop(12, &scheduler);
 
-        // Run for ~18 seconds
-        run_loop(18, &scheduler);
-    } else {
-        // Default mode: run for ~12 seconds, dump snapshot at end
-        run_loop(12, &scheduler);
+            println!();
+            println!("=== Final Reactive Graph ===");
+            println!("{}", auralis_task::dump_reactive_graph());
 
-        println!();
-        println!("=== Final Reactive Graph ===");
-        println!("{}", auralis_task::dump_reactive_graph());
+            println!();
+            println!("=== Memo Dependency Graph ===");
+            print_dep_graph(&pipeline);
 
-        println!();
-        println!("=== Memo Dependency Graph ===");
-        print_dep_graph(&pipeline);
-
-        let final_snap = auralis_devtools::snapshot();
-        let json = serde_json::to_string_pretty(&final_snap).unwrap();
-        println!();
-        println!("=== Final JSON Snapshot ===");
-        println!("{json}");
+            let final_snap = auralis_devtools::snapshot();
+            let json = serde_json::to_string_pretty(&final_snap).unwrap();
+            println!();
+            println!("=== Final JSON Snapshot ===");
+            println!("{json}");
+        }
     }
 
     // Clean shutdown — dropping root cancels all tasks.
