@@ -980,6 +980,156 @@ macro_rules! consume_context {
 }
 
 // ---------------------------------------------------------------------------
+// Structured scope tree (debug feature)
+// ---------------------------------------------------------------------------
+
+/// A node in the scope tree, serializable for `DevTools`.
+#[cfg(feature = "debug")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScopeTreeNode {
+    /// Unique scope id.
+    pub id: ScopeId,
+    /// Label set via `set_label()`.
+    pub label: Option<String>,
+    /// Spawned tasks in this scope.
+    pub tasks: Vec<TaskNode>,
+    /// Child scopes (recursive).
+    pub children: Vec<ScopeTreeNode>,
+}
+
+/// A task entry within a scope.
+#[cfg(feature = "debug")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskNode {
+    /// Executor-assigned task id.
+    pub id: TaskId,
+    /// `"H"` or `"L"`.
+    pub priority: &'static str,
+    /// Whether the task is currently enqueued for polling.
+    pub queued: bool,
+}
+
+/// Recursively assemble a scope sub-tree.
+#[cfg(feature = "debug")]
+fn attach_children(
+    id: u64,
+    scope_map: &mut std::collections::HashMap<u64, ScopeTreeNode>,
+    child_map: &std::collections::HashMap<u64, Vec<u64>>,
+) -> ScopeTreeNode {
+    let mut node = scope_map.remove(&id).unwrap_or(ScopeTreeNode {
+        id,
+        label: None,
+        tasks: Vec::new(),
+        children: Vec::new(),
+    });
+    if let Some(child_ids) = child_map.get(&id) {
+        let mut child_ids = child_ids.clone();
+        child_ids.sort_unstable();
+        for cid in child_ids {
+            node.children
+                .push(attach_children(cid, scope_map, child_map));
+        }
+    }
+    node
+}
+
+/// Build the scope tree from the global scope registry.
+///
+/// Root scopes (those with no live parent) form the top-level list.
+/// Tasks are annotated with their enqueued status.
+#[cfg(feature = "debug")]
+#[must_use]
+pub fn scope_tree() -> Vec<ScopeTreeNode> {
+    use crate::executor;
+
+    let task_snap = executor::debug_task_snapshot();
+    let queued: std::collections::HashSet<u64> =
+        executor::debug_queued_task_ids().into_iter().collect();
+
+    // Group tasks by scope_id.
+    let mut tasks_by_scope: std::collections::HashMap<u64, Vec<TaskNode>> =
+        std::collections::HashMap::new();
+    for (tid, pri, sid) in &task_snap {
+        tasks_by_scope.entry(*sid).or_default().push(TaskNode {
+            id: *tid,
+            priority: match pri {
+                Priority::High => "H",
+                Priority::Low => "L",
+            },
+            queued: queued.contains(tid),
+        });
+    }
+
+    // Collect live scopes.
+    let mut scope_map: std::collections::HashMap<u64, ScopeTreeNode> =
+        std::collections::HashMap::new();
+
+    let _ = SCOPE_REGISTRY.try_with(|reg| {
+        if let Ok(r) = reg.try_borrow() {
+            for (&id, (inner_weak, _suspended_weak)) in r.iter() {
+                let Some(inner) = inner_weak.upgrade() else {
+                    continue;
+                };
+                let b = inner.borrow();
+                scope_map.insert(
+                    id,
+                    ScopeTreeNode {
+                        id,
+                        label: b.label.clone(),
+                        tasks: tasks_by_scope.remove(&id).unwrap_or_default(),
+                        children: Vec::new(), // filled below
+                    },
+                );
+            }
+        }
+    });
+
+    // Build parent-child links as id→[child_id] maps.
+    let mut roots: Vec<u64> = Vec::new();
+    let mut child_map: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
+
+    let _ = SCOPE_REGISTRY.try_with(|reg| {
+        if let Ok(r) = reg.try_borrow() {
+            for (&id, (inner_weak, _)) in r.iter() {
+                let Some(inner) = inner_weak.upgrade() else {
+                    continue;
+                };
+                let b = inner.borrow();
+                let has_live_parent = b.parent.as_ref().and_then(Weak::upgrade).is_some();
+                if !has_live_parent {
+                    roots.push(id);
+                } else if let Some(p) = b.parent.as_ref().and_then(Weak::upgrade) {
+                    child_map.entry(p.borrow().id).or_default().push(id);
+                }
+            }
+        }
+    });
+
+    // Sort tasks within each scope by id for determinism.
+    for node in scope_map.values_mut() {
+        node.tasks.sort_by_key(|t| t.id);
+    }
+
+    let mut tree = Vec::new();
+    roots.sort_unstable();
+    for rid in roots {
+        tree.push(attach_children(rid, &mut scope_map, &child_map));
+    }
+    // Any remaining scopes not reachable from roots (shouldn't normally
+    // happen, but be defensive).
+    let remaining: Vec<u64> = {
+        let mut ids: Vec<u64> = scope_map.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    };
+    for id in remaining {
+        tree.push(attach_children(id, &mut scope_map, &child_map));
+    }
+
+    tree
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

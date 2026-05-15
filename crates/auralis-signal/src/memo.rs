@@ -134,6 +134,8 @@ pub struct Memo<T> {
     compute_count: Rc<Cell<u64>>,
     /// Optional label set via [`set_label`](Memo::set_label).
     label: Rc<RefCell<Option<String>>>,
+    /// Microseconds spent in the most recent successful recomputation.
+    last_compute_us: Rc<Cell<u64>>,
 }
 
 impl<T: Clone + 'static> Memo<T> {
@@ -176,6 +178,7 @@ impl<T: Clone + 'static> Memo<T> {
             computing,
             compute_count,
             label: Rc::new(RefCell::new(None)),
+            last_compute_us: Rc::new(Cell::new(0)),
         };
 
         memo.dirty.set(false);
@@ -192,6 +195,7 @@ impl<T: Clone + 'static> Memo<T> {
                 Rc::clone(&memo.dirty),
                 Rc::clone(&memo.compute_count),
                 Rc::clone(&memo.label),
+                Rc::clone(&memo.last_compute_us),
                 state_addr,
             ));
         }
@@ -328,6 +332,7 @@ impl<T: Clone + 'static> Memo<T> {
         let new_subs: SubscriptionList = Rc::new(RefCell::new(Vec::new()));
         let holder = Rc::new(RefCell::new(Some(self.signal.clone())));
 
+        let t0 = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_compute(
                 &self.compute,
@@ -386,6 +391,11 @@ impl<T: Clone + 'static> Memo<T> {
                 self.dirty.set(false);
                 self.compute_count
                     .set(self.compute_count.get().wrapping_add(1));
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    let elapsed_us = t0.elapsed().as_micros() as u64;
+                    self.last_compute_us.set(elapsed_us);
+                }
             }
             Err(payload) => {
                 // Compute panicked — clean up partial new subscriptions.
@@ -527,6 +537,7 @@ impl<T> Clone for Memo<T> {
             computing: Rc::clone(&self.computing),
             compute_count: Rc::clone(&self.compute_count),
             label: Rc::clone(&self.label),
+            last_compute_us: Rc::clone(&self.last_compute_us),
         }
     }
 }

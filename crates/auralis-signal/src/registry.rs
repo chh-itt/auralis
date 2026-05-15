@@ -37,6 +37,9 @@ pub struct ReactiveNodeSnapshot {
     /// Addresses of this memo's source signal dependencies
     /// (`None` for signals, empty if the memo has no deps).
     pub dependency_addrs: Option<Vec<usize>>,
+    /// Microseconds spent in the most recent successful recomputation
+    /// (`None` for signals).
+    pub last_compute_us: Option<u64>,
 }
 
 type RegistryCallback = Box<dyn Fn() -> Option<ReactiveNodeSnapshot>>;
@@ -105,6 +108,7 @@ pub(crate) fn make_signal_callback<T: 'static>(
             compute_count: None,
             dependency_count: None,
             dependency_addrs: None,
+            last_compute_us: None,
         })
     })
 }
@@ -117,6 +121,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
     dirty: Rc<std::cell::Cell<bool>>,
     compute_count: Rc<std::cell::Cell<u64>>,
     label: Rc<RefCell<Option<String>>>,
+    last_compute_us: Rc<std::cell::Cell<u64>>,
     state_addr: usize,
 ) -> RegistryCallback {
     Box::new(move || {
@@ -136,6 +141,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
             compute_count: Some(compute_count.get()),
             dependency_count: Some(dep_count),
             dependency_addrs: Some(dep_addrs),
+            last_compute_us: Some(last_compute_us.get()),
         })
     })
 }

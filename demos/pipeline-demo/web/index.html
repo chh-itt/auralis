@@ -11,6 +11,9 @@ header{background:#161b22;padding:10px 20px;display:flex;align-items:center;gap:
 header h1{font-size:16px;color:#58a6ff}
 header .stat{font-size:12px;color:#8b949e}
 header .stat b{color:#c9d1d9}
+#timeline-bar{display:flex;align-items:center;gap:1px;flex:1;overflow:hidden;height:14px}
+#timeline-bar .tick{width:3px;border-radius:1px;background:#30363d;flex-shrink:0}
+#timeline-bar .tick.active{background:#58a6ff}
 #panels{display:flex;flex:1;overflow:hidden}
 .panel{flex:1;overflow-y:auto;padding:12px;border-right:1px solid #30363d;min-width:0}
 .panel:last-child{border-right:none}
@@ -41,6 +44,14 @@ tr:hover{background:#161b22}
 .status-alive{background:#3fb950}
 .status-dead{background:#f85149}
 .computed-high{color:#f0883e}
+.tree-node{margin-left:16px;border-left:1px solid #21262d;padding-left:8px}
+.tree-toggle{cursor:pointer;color:#8b949e;user-select:none;display:inline-block;width:14px}
+.tree-toggle:hover{color:#c9d1d9}
+.tree-label{font-size:11px;color:#c9d1d9}
+.tree-label .scope-id{color:#58a6ff}
+.tree-label .task-id{color:#8b949e}
+.tree-label .queued{color:#3fb950;margin-left:4px}
+.tree-label .waiting{color:#484f58;margin-left:4px}
 </style>
 </head>
 <body>
@@ -51,19 +62,24 @@ tr:hover{background:#161b22}
   <span class="stat" id="task-count">Tasks: <b>0</b></span>
   <span class="stat">|</span>
   <span class="stat" id="conn-status"><span class="status status-dead"></span>disconnected</span>
+  <span class="stat">|</span>
+  <span class="stat">Snapshots: <b id="snap-count">0</b></span>
+  <span class="stat">|</span>
+  <input id="search" type="text" placeholder="Filter…" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:2px 6px;font-size:11px;border-radius:3px;width:120px">
+  <div id="timeline-bar" title="Change timeline"></div>
 </header>
 <div id="panels">
   <div class="panel" id="signals-panel">
     <h2>Signals</h2>
     <table>
-      <thead><tr><th>Label</th><th>Ver</th><th>Subs</th><th>Addr</th></tr></thead>
+      <thead><tr><th>Label</th><th>Ver</th><th>Subs</th><th>Watched By</th><th>Addr</th></tr></thead>
       <tbody id="signals-body"></tbody>
     </table>
   </div>
   <div class="panel" id="memos-panel">
     <h2>Memos</h2>
     <table>
-      <thead><tr><th>Label</th><th>Ver</th><th>Subs</th><th>Dirty</th><th>Computed</th><th>Deps</th><th>Addr</th></tr></thead>
+      <thead><tr><th>Label</th><th>Ver</th><th>Subs</th><th>Dirty</th><th>Computed</th><th>Last µs</th><th>Deps</th><th>Addr</th></tr></thead>
       <tbody id="memos-body"></tbody>
     </table>
   </div>
@@ -78,7 +94,7 @@ tr:hover{background:#161b22}
   </div>
   <div class="panel" id="tasks-panel">
     <h2>Task Tree</h2>
-    <pre id="task-tree" style="font-size:10px;line-height:1.5"></pre>
+    <div id="task-tree"></div>
   </div>
 </div>
 
@@ -87,6 +103,7 @@ tr:hover{background:#161b22}
 const WS_URL = 'ws://127.0.0.1:9642';
 let addrToLabel = {};
 let snapData = null;
+let snapCount = 0;
 
 function connect() {
   const ws = new WebSocket(WS_URL);
@@ -104,17 +121,24 @@ function setStatus(ok) {
 
 function render(snap) {
   snapData = snap;
+  snapCount++;
   addrToLabel = {};
   for (const s of snap.signals) if (s.label) addrToLabel[s.addr] = s.label;
   for (const m of snap.memos) if (m.label) addrToLabel[m.addr] = m.label;
 
-  renderSignals(snap.signals);
-  renderMemos(snap.memos);
-  renderGraph(snap.signals, snap.memos);
-  renderTasks(snap.task_tree);
+  const q = (document.getElementById('search').value || '').toLowerCase();
+  const sigs = q ? snap.signals.filter(s => (s.label || '').toLowerCase().includes(q) || s.addr.toLowerCase().includes(q)) : snap.signals;
+  const mems = q ? snap.memos.filter(m => (m.label || '').toLowerCase().includes(q) || m.addr.toLowerCase().includes(q)) : snap.memos;
 
-  document.getElementById('sig-count').innerHTML = `Signals: <b>${snap.signals.length}</b>`;
-  document.getElementById('memo-count').innerHTML = `Memos: <b>${snap.memos.length}</b>`;
+  renderSignals(sigs);
+  renderMemos(mems);
+  renderGraph(sigs, mems);
+  renderTasks();
+  renderTimeline(snap.timeline || []);
+
+  document.getElementById('sig-count').innerHTML = `Signals: <b>${sigs.length}</b>`;
+  document.getElementById('memo-count').innerHTML = `Memos: <b>${mems.length}</b>`;
+  document.getElementById('snap-count').textContent = snapCount;
 }
 
 function renderSignals(signals) {
@@ -123,6 +147,7 @@ function renderSignals(signals) {
       <td>${esc(s.label || '(unnamed)')}</td>
       <td>${s.version}</td>
       <td>${s.subscriber_count}</td>
+      <td>${(s.subscribed_by || []).map(a => esc(addrToLabel[a] || short(a))).join(', ') || '—'}</td>
       <td class="addr">${s.addr}</td>
     </tr>`).join('');
 }
@@ -135,6 +160,7 @@ function renderMemos(memos) {
       <td>${m.subscriber_count}</td>
       <td>${m.is_dirty ? '⚠' : '✓'}</td>
       <td class="${m.compute_count > 100000 ? 'computed-high' : ''}">${m.compute_count}</td>
+      <td>${m.last_compute_us != null ? m.last_compute_us + 'µs' : '—'}</td>
       <td>${m.dependency_addrs.map(a => esc(addrToLabel[a] || short(a))).join(', ')}</td>
       <td class="addr">${m.addr}</td>
     </tr>`).join('');
@@ -164,7 +190,8 @@ function renderGraph(signals, memos) {
   for (const m of memos) {
     const label = addrToLabel[m.addr] || m.label || short(m.addr);
     const n = { id: m.addr, label, type: 'memo', subs: m.subscriber_count, ver: m.version,
-      dirty: m.is_dirty, computed: m.compute_count, deps: m.dependency_addrs };
+      dirty: m.is_dirty, computed: m.compute_count, deps: m.dependency_addrs,
+      last_us: m.last_compute_us };
     nodes.push(n);
     nodeMap[m.addr] = n;
     for (const dep of m.dependency_addrs) {
@@ -215,7 +242,7 @@ function renderGraph(signals, memos) {
       <div class="tt-row">ver: <b>${d.ver}</b>  subs: <b>${d.subs}</b></div>
       ${d.type === 'memo' ? `
       <div class="tt-row">dirty: <b>${d.dirty}</b>  computed: <b>${d.computed}x</b></div>
-      <div class="tt-row">deps: <b>${d.deps.length}</b></div>` : ''}
+      <div class="tt-row">last: <b>${d.last_us != null ? d.last_us + 'µs' : '—'}</b>  deps: <b>${d.deps.length}</b></div>` : ''}
     `);
   }).on('mousemove', (e) => {
     const box = svg.node().getBoundingClientRect();
@@ -276,14 +303,72 @@ function renderGraph(signals, memos) {
 
 // ── Tasks ──────────────────────────────────────────────────────────
 
-function renderTasks(text) {
-  document.getElementById('task-tree').textContent = text;
-  const m = text.match(/task \d+/g);
-  document.getElementById('task-count').innerHTML = `Tasks: <b>${m ? m.length : 0}</b>`;
+function renderTasks() {
+  const tree = snapData.scope_tree || [];
+  const container = document.getElementById('task-tree');
+  let totalTasks = 0;
+  container.innerHTML = tree.map(n => renderScopeNode(n)).join('');
+
+  function renderScopeNode(n, depth = 0) {
+    const hasChildren = n.children && n.children.length > 0;
+    const nTasks = n.tasks ? n.tasks.length : 0;
+    totalTasks += nTasks;
+    const id = `s${n.id}`;
+    let h = `<div class="tree-node">`;
+    h += `<div><span class="tree-toggle" onclick="
+      const el=document.getElementById('${id}');
+      if(el){el.style.display=el.style.display==='none'?'block':'none';}
+      this.textContent=el&&el.style.display==='none'?'▶':'▼';
+    ">▼</span>`;
+    h += `<span class="tree-label">`;
+    h += `<span class="scope-id">Scope ${n.id}</span>`;
+    if (n.label) h += ` <span style="color:#c9d1d9">"${esc(n.label)}"</span>`;
+    h += ` <span style="color:#484f58">(${nTasks} tasks, ${hasChildren ? n.children.length : 0} children)</span>`;
+    h += `</span></div>`;
+    h += `<div id="${id}">`;
+    for (const t of (n.tasks || [])) {
+      h += `<div class="tree-node">`;
+      h += `<span class="tree-label">`;
+      h += `<span class="task-id">task ${t.id}</span>`;
+      h += ` <span style="color:#8b949e">[${t.priority}]</span>`;
+      h += t.queued
+        ? ` <span class="queued">● queued</span>`
+        : ` <span class="waiting">○ waiting</span>`;
+      h += `</span></div>`;
+    }
+    if (hasChildren) {
+      for (const c of n.children) {
+        h += renderScopeNode(c, depth + 1);
+      }
+    }
+    h += `</div></div>`;
+    return h;
+  }
+
+  document.getElementById('task-count').innerHTML = `Tasks: <b>${totalTasks}</b>`;
+}
+
+function renderTimeline(timeline) {
+  const bar = document.getElementById('timeline-bar');
+  const MAX = 60;
+  const entries = timeline.slice(-MAX);
+  bar.innerHTML = '';
+  for (let i = 0; i < MAX; i++) {
+    const tick = document.createElement('span');
+    tick.className = 'tick' + (i < entries.length ? ' active' : '');
+    if (i < entries.length) {
+      tick.title = 'seq ' + entries[i].seq + ' @ ' + entries[i].ms_since_start + 'ms';
+    }
+    bar.appendChild(tick);
+  }
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function short(addr) { return addr.slice(0, 10) + '…'; }
+
+document.getElementById('search').addEventListener('input', () => {
+  if (snapData) render(snapData);
+});
 
 connect();
 </script>

@@ -11,9 +11,10 @@
 //! - **`set_deferred`** — safe signal mutation from [`Drop`] contexts.
 //! - **Pluggable storage** — [`ScopeStore`] and [`Executor::new_instance`]
 //!   enable multi-request isolation for SSR or multi-threaded runtimes.
-//! - **Diagnostics** — `dump_reactive_graph()` (behind the `debug`
-//!   feature) provides a unified snapshot of all signals, memos, and
-//!   tasks.  [`TaskScope`] supports optional labels for diagnostic output.
+//! - **Diagnostics** — `dump_reactive_graph()` and [`scope_tree`]
+//!   (behind the `debug` feature) provide structured introspection
+//!   of the reactive graph.  [`TaskScope`] supports optional labels
+//!   for diagnostic output.
 //!
 //! # Quick example
 //!
@@ -53,12 +54,12 @@ pub use executor::{
 };
 #[cfg(test)]
 pub use executor::{TestScheduleFlush, TestTimeSource};
-#[cfg(feature = "debug")]
-pub use scope::scope_debug_label;
 pub use scope::{
     clear_scope_registry, current_scope, find_scope, set_scope_store, with_current_scope,
     CallbackHandle, JoinHandle, ScopeStore, TaskScope,
 };
+#[cfg(feature = "debug")]
+pub use scope::{scope_debug_label, scope_tree, ScopeTreeNode, TaskNode};
 
 #[cfg(feature = "ssr-tokio")]
 pub use scope::init_scope_store_tokio;

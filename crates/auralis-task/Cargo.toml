@@ -9,11 +9,12 @@ repository.workspace = true
 
 [features]
 default = []
-debug = ["auralis-signal/diagnostics"]
+debug = ["auralis-signal/diagnostics", "dep:serde"]
 ssr-tokio = ["dep:tokio"]
 
 [dependencies]
 auralis-signal.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
 
 # Optional — for SSR multi-request isolation with tokio task_local!
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros"] }
