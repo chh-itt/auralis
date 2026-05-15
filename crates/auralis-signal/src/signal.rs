@@ -181,7 +181,9 @@ impl<T: 'static> Signal<T> {
 
         Self { state, label }
     }
+}
 
+impl<T> Signal<T> {
     /// Create a signal **without** registering in the diagnostics
     /// registry.  Used by [`Memo`](crate::Memo) for its internal
     /// output signal — the memo has its own registry entry and the
