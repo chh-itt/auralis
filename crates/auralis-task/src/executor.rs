@@ -687,172 +687,181 @@ impl Executor {
             (op.f)();
         }
 
-        // Step 2: drain deferred signal callbacks with time budget.
-        {
-            let cb_start = ex.borrow().now_ms();
-            loop {
-                let callbacks = std::mem::take(&mut ex.borrow_mut().deferred_callbacks);
-                if callbacks.is_empty() {
-                    break;
-                }
-                for cb in callbacks {
-                    // Isolate each callback so a panic in one subscriber
-                    // doesn't block the remaining notifications or wedge
-                    // the executor (in_flush stays true on unwind).
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
-                }
-                if ex.borrow().now_ms().saturating_sub(cb_start) >= ex.borrow().time_budget_ms {
-                    if !ex.borrow().deferred_callbacks.is_empty() {
-                        let (sched, ex2) = {
-                            let mut e = ex.borrow_mut();
-                            e.in_flush = false;
-                            e.is_flush_scheduled = false;
-                            (e.try_schedule_flush(), Rc::clone(ex))
-                        };
-                        if let Some(sched) = sched {
-                            sched.schedule(Box::new(move || Self::flush_instance(&ex2)));
-                        }
-                        return;
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Step 3: main poll loop with time-budget check.
-        let poll_start = ex.borrow().now_ms();
-        loop {
-            let task_id = ex.borrow_mut().dequeue();
-            let Some(tid) = task_id else {
-                let mut e = ex.borrow_mut();
-                e.is_flush_scheduled = false;
-                e.in_flush = false;
-                break;
-            };
-
-            // Take the task out so the poll doesn't hold an executor borrow.
-            let maybe_state = ex.borrow_mut().tasks[tid as usize].take();
-            if let Some(mut state) = maybe_state {
-                let priority = state.priority;
-                let scope_id = state.scope_id;
-
-                // Check if the owning scope is suspended.
-                let scope = crate::scope::find_scope(scope_id);
-                if let Some(ref s) = scope {
-                    if s.is_suspended() {
-                        let mut e = ex.borrow_mut();
-                        if e.tasks[tid as usize].is_none() {
-                            e.tasks[tid as usize] = Some(state);
-                        }
-                        continue;
-                    }
-                }
-
-                // Ensure the executor is registered in the slot table.
-                // Must not call ensure_global_registered while holding
-                // a borrow on ex (it borrows the global EXECUTOR).
-                let (slot_id, gen) = {
-                    let e = ex.borrow();
-                    if e.registered {
-                        (e.slot_id, e.generation)
-                    } else {
-                        drop(e);
-                        ensure_global_registered()
-                    }
-                };
-                let waker = Waker::from(Arc::new(TaskWaker {
-                    task_id: tid,
-                    priority,
-                    slot_id,
-                    generation: gen,
-                }));
-                let mut cx = Context::from_waker(&waker);
-
-                // Inject owning scope.
-                let prev_scope = crate::scope::get_scope_direct();
-                if scope.is_some() {
-                    crate::scope::set_scope_direct(scope);
-                }
-
-                // Let futures discover their task id (used by timer::sleep).
-                // Save and restore so that a nested flush (sync scheduler)
-                // doesn't leave the outer task without its id afterward.
-                let prev_polling = CURRENT_POLLING_TASK.with(|c| c.replace(Some(tid)));
-
-                // Task isolation + timing.
-                state.total_poll_count = state.total_poll_count.wrapping_add(1);
-                let t0 = auralis_signal::now_us();
-                let result: Result<Poll<()>, Box<dyn std::any::Any + Send>> =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        state.future.as_mut().poll(&mut cx)
-                    }));
-                let elapsed = auralis_signal::now_us().saturating_sub(t0);
-
-                CURRENT_POLLING_TASK.with(|c| c.set(prev_polling));
-                crate::scope::set_scope_direct(prev_scope);
-
-                // Extract timer_deadline before state is dropped, so
-                // we can clean up the timer entry (free_slot can't
-                // read it because the slot is already None).
-                let timer_dl = state.timer_deadline;
-
-                state.last_poll_duration_us = elapsed;
-                match result {
-                    Ok(Poll::Ready(())) => {
-                        if timer_dl != 0 {
-                            ex.borrow_mut().cleanup_timer(tid, timer_dl);
-                        }
-                        ex.borrow_mut().free_slot(tid);
-                    }
-                    Err(payload) => {
-                        if timer_dl != 0 {
-                            ex.borrow_mut().cleanup_timer(tid, timer_dl);
-                        }
-                        let hook = ex.borrow().panic_hook.clone();
-                        if let Some(h) = hook {
-                            h(PanicInfo {
-                                task_id: tid,
-                                scope_id,
-                                payload,
-                            });
-                        }
-                        ex.borrow_mut().free_slot(tid);
-                    }
-                    Ok(Poll::Pending) => {
-                        let mut e = ex.borrow_mut();
-                        if e.tasks[tid as usize].is_none() {
-                            e.tasks[tid as usize] = Some(state);
-                        }
-                    }
-                }
-            }
-
-            // Time budget check.
+        // Steps 2+3 may need to re-run if task polling queues new
+        // signal callbacks (re-entrant cross-scope propagation).
+        for _pass in 0..3_u8 {
             {
-                let elapsed = ex.borrow().now_ms().saturating_sub(poll_start);
-                if elapsed >= ex.borrow().time_budget_ms {
-                    let (maybe_sched, ex_clone) = {
-                        let mut e = ex.borrow_mut();
-                        e.is_flush_scheduled = false;
-                        e.in_flush = false;
-                        let sched = if !e.high_queue.is_empty() || !e.low_queue.is_empty() {
-                            e.try_schedule_flush()
-                        } else {
-                            None
-                        };
-                        (sched, Rc::clone(ex))
-                    };
-                    if let Some(sched) = maybe_sched {
-                        sched.schedule(Box::new(move || Self::flush_instance(&ex_clone)));
+                let cb_start = ex.borrow().now_ms();
+                loop {
+                    let callbacks = std::mem::take(&mut ex.borrow_mut().deferred_callbacks);
+                    if callbacks.is_empty() {
+                        break;
                     }
-                    break;
+                    for cb in callbacks {
+                        // Isolate each callback so a panic in one subscriber
+                        // doesn't block the remaining notifications or wedge
+                        // the executor (in_flush stays true on unwind).
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
+                    }
+                    if ex.borrow().now_ms().saturating_sub(cb_start) >= ex.borrow().time_budget_ms {
+                        if !ex.borrow().deferred_callbacks.is_empty() {
+                            let (sched, ex2) = {
+                                let mut e = ex.borrow_mut();
+                                e.in_flush = false;
+                                e.is_flush_scheduled = false;
+                                (e.try_schedule_flush(), Rc::clone(ex))
+                            };
+                            if let Some(sched) = sched {
+                                sched.schedule(Box::new(move || Self::flush_instance(&ex2)));
+                            }
+                            return;
+                        }
+                        break;
+                    }
                 }
             }
-        }
 
-        // Drain any wakes that were buffered while the executor RefCell
-        // was borrowed (PENDING_WAKES fallback in TaskWaker::wake).
-        drain_pending_wakes();
+            // Step 3: main poll loop with time-budget check.
+            let poll_start = ex.borrow().now_ms();
+            loop {
+                let task_id = ex.borrow_mut().dequeue();
+                let Some(tid) = task_id else {
+                    let mut e = ex.borrow_mut();
+                    e.is_flush_scheduled = false;
+                    e.in_flush = false;
+                    break;
+                };
+
+                // Take the task out so the poll doesn't hold an executor borrow.
+                let maybe_state = ex.borrow_mut().tasks[tid as usize].take();
+                if let Some(mut state) = maybe_state {
+                    let priority = state.priority;
+                    let scope_id = state.scope_id;
+
+                    // Check if the owning scope is suspended.
+                    let scope = crate::scope::find_scope(scope_id);
+                    if let Some(ref s) = scope {
+                        if s.is_suspended() {
+                            let mut e = ex.borrow_mut();
+                            if e.tasks[tid as usize].is_none() {
+                                e.tasks[tid as usize] = Some(state);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Ensure the executor is registered in the slot table.
+                    // Must not call ensure_global_registered while holding
+                    // a borrow on ex (it borrows the global EXECUTOR).
+                    let (slot_id, gen) = {
+                        let e = ex.borrow();
+                        if e.registered {
+                            (e.slot_id, e.generation)
+                        } else {
+                            drop(e);
+                            ensure_global_registered()
+                        }
+                    };
+                    let waker = Waker::from(Arc::new(TaskWaker {
+                        task_id: tid,
+                        priority,
+                        slot_id,
+                        generation: gen,
+                    }));
+                    let mut cx = Context::from_waker(&waker);
+
+                    // Inject owning scope.
+                    let prev_scope = crate::scope::get_scope_direct();
+                    if scope.is_some() {
+                        crate::scope::set_scope_direct(scope);
+                    }
+
+                    // Let futures discover their task id (used by timer::sleep).
+                    // Save and restore so that a nested flush (sync scheduler)
+                    // doesn't leave the outer task without its id afterward.
+                    let prev_polling = CURRENT_POLLING_TASK.with(|c| c.replace(Some(tid)));
+
+                    // Task isolation + timing.
+                    state.total_poll_count = state.total_poll_count.wrapping_add(1);
+                    let t0 = auralis_signal::now_us();
+                    let result: Result<Poll<()>, Box<dyn std::any::Any + Send>> =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            state.future.as_mut().poll(&mut cx)
+                        }));
+                    let elapsed = auralis_signal::now_us().saturating_sub(t0);
+
+                    CURRENT_POLLING_TASK.with(|c| c.set(prev_polling));
+                    crate::scope::set_scope_direct(prev_scope);
+
+                    // Extract timer_deadline before state is dropped, so
+                    // we can clean up the timer entry (free_slot can't
+                    // read it because the slot is already None).
+                    let timer_dl = state.timer_deadline;
+
+                    state.last_poll_duration_us = elapsed;
+                    match result {
+                        Ok(Poll::Ready(())) => {
+                            if timer_dl != 0 {
+                                ex.borrow_mut().cleanup_timer(tid, timer_dl);
+                            }
+                            ex.borrow_mut().free_slot(tid);
+                        }
+                        Err(payload) => {
+                            if timer_dl != 0 {
+                                ex.borrow_mut().cleanup_timer(tid, timer_dl);
+                            }
+                            let hook = ex.borrow().panic_hook.clone();
+                            if let Some(h) = hook {
+                                h(PanicInfo {
+                                    task_id: tid,
+                                    scope_id,
+                                    payload,
+                                });
+                            }
+                            ex.borrow_mut().free_slot(tid);
+                        }
+                        Ok(Poll::Pending) => {
+                            let mut e = ex.borrow_mut();
+                            if e.tasks[tid as usize].is_none() {
+                                e.tasks[tid as usize] = Some(state);
+                            }
+                        }
+                    }
+                }
+
+                // Time budget check.
+                {
+                    let elapsed = ex.borrow().now_ms().saturating_sub(poll_start);
+                    if elapsed >= ex.borrow().time_budget_ms {
+                        let (maybe_sched, ex_clone) = {
+                            let mut e = ex.borrow_mut();
+                            e.is_flush_scheduled = false;
+                            e.in_flush = false;
+                            let sched = if !e.high_queue.is_empty() || !e.low_queue.is_empty() {
+                                e.try_schedule_flush()
+                            } else {
+                                None
+                            };
+                            (sched, Rc::clone(ex))
+                        };
+                        if let Some(sched) = maybe_sched {
+                            sched.schedule(Box::new(move || Self::flush_instance(&ex_clone)));
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Drain any wakes that were buffered while the executor RefCell
+            // was borrowed (PENDING_WAKES fallback in TaskWaker::wake).
+            drain_pending_wakes();
+
+            // Continue only if signal callbacks accumulated during
+            // polling and there are tasks to wake.
+            if ex.borrow().deferred_callbacks.is_empty() {
+                break;
+            }
+        } // end passes loop
     }
 }
 
