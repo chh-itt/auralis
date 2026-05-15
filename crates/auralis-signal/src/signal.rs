@@ -181,6 +181,26 @@ impl<T: 'static> Signal<T> {
 
         Self { state, label }
     }
+
+    /// Create a signal **without** registering in the diagnostics
+    /// registry.  Used by [`Memo`](crate::Memo) for its internal
+    /// output signal — the memo has its own registry entry and the
+    /// internal signal would otherwise appear as a duplicate
+    /// unnamed node.
+    #[must_use]
+    pub(crate) fn new_untracked(val: T) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SignalState {
+                value: val,
+                version: 0,
+                next_subscriber_id: 0,
+                subscribers: Vec::new(),
+                dirty: false,
+                notifying: false,
+            })),
+            label: Rc::new(RefCell::new(None)),
+        }
+    }
 }
 
 impl<T> Signal<T> {

@@ -13,6 +13,7 @@
 //! cargo run -p pipeline-demo -- devtools # Print snapshot every 3 seconds
 //! ```
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 use std::time::Duration;
@@ -23,14 +24,35 @@ use auralis_task::timer;
 use auralis_task::TaskScope;
 
 // ---------------------------------------------------------------------------
-// Scheduler: synchronous flush (like Wasm / game loop)
+// Scheduler: defers flush callbacks — drained by the main loop.
+// This avoids re-entrant flush_instance calls that occur with a
+// synchronous scheduler + timers.
 // ---------------------------------------------------------------------------
 
-struct SyncScheduler;
+type FlushCallback = Box<dyn FnOnce()>;
 
-impl auralis_task::ScheduleFlush for SyncScheduler {
-    fn schedule(&self, callback: Box<dyn FnOnce()>) {
-        callback();
+struct DemoScheduler {
+    pending: RefCell<Vec<FlushCallback>>,
+}
+
+impl DemoScheduler {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            pending: RefCell::new(Vec::new()),
+        })
+    }
+
+    fn drain(&self) {
+        let cbs: Vec<FlushCallback> = self.pending.borrow_mut().drain(..).collect();
+        for cb in cbs {
+            cb();
+        }
+    }
+}
+
+impl auralis_task::ScheduleFlush for DemoScheduler {
+    fn schedule(&self, callback: FlushCallback) {
+        self.pending.borrow_mut().push(callback);
     }
 }
 
@@ -243,7 +265,8 @@ impl Pipeline {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    init_flush_scheduler(Rc::new(SyncScheduler));
+    let scheduler = DemoScheduler::new();
+    init_flush_scheduler(scheduler.clone());
 
     let pipeline = Rc::new(Pipeline::new());
     let root = TaskScope::new();
@@ -328,10 +351,10 @@ fn main() {
         });
 
         // Run for ~18 seconds
-        run_loop(18);
+        run_loop(18, &scheduler);
     } else {
         // Default mode: run for ~12 seconds, dump snapshot at end
-        run_loop(12);
+        run_loop(12, &scheduler);
 
         println!();
         println!("=== Final Reactive Graph ===");
@@ -353,14 +376,14 @@ fn main() {
     println!("\nPipeline shut down.");
 }
 
-fn run_loop(seconds: u64) {
+fn run_loop(seconds: u64, scheduler: &DemoScheduler) {
     let end = std::time::Instant::now() + Duration::from_secs(seconds);
-    // Busy-loop: the SyncScheduler runs callbacks synchronously, so
-    // timer::sleep triggers immediately on the next flush.
     while std::time::Instant::now() < end {
-        // Each iteration, any pending timers fire synchronously
-        // through the flush scheduler.
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
+        // Drain all pending flush callbacks (timers, signal notifications).
+        // Without a TimeSource, all timers expire and tasks are re-polled
+        // on each drain cycle.
+        scheduler.drain();
     }
 }
 

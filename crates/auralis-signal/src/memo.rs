@@ -165,7 +165,7 @@ impl<T: Clone + 'static> Memo<T> {
             &HashSet::new(),
         );
 
-        let signal = Signal::new(value);
+        let signal = Signal::new_untracked(value);
         *holder.borrow_mut() = Some(signal.clone());
 
         let memo = Self {
