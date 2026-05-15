@@ -1032,7 +1032,8 @@ pub fn install_timing_hook(hook: fn() -> u64) {
 
 /// Return the current time in microseconds, or 0 if no hook is
 /// installed and the platform doesn't support `Instant`.
-pub(crate) fn now_us() -> u64 {
+#[must_use]
+pub fn now_us() -> u64 {
     TIMING_HOOK.with(|c| {
         if let Some(hook) = c.borrow().as_ref() {
             return hook();

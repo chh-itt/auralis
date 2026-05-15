@@ -1007,6 +1007,10 @@ pub struct TaskNode {
     pub priority: &'static str,
     /// Whether the task is currently enqueued for polling.
     pub queued: bool,
+    /// Total number of times this task has been polled.
+    pub total_poll_count: u64,
+    /// Microseconds spent in the most recent poll.
+    pub last_poll_duration_us: u64,
 }
 
 /// Recursively assemble a scope sub-tree.
@@ -1045,11 +1049,13 @@ pub fn scope_tree() -> Vec<ScopeTreeNode> {
     let task_snap = executor::debug_task_snapshot();
     let queued: std::collections::HashSet<u64> =
         executor::debug_queued_task_ids().into_iter().collect();
+    let timing = executor::debug_task_timing();
 
     // Group tasks by scope_id.
     let mut tasks_by_scope: std::collections::HashMap<u64, Vec<TaskNode>> =
         std::collections::HashMap::new();
     for (tid, pri, sid) in &task_snap {
+        let (poll_count, last_us) = timing.get(tid).copied().unwrap_or((0, 0));
         tasks_by_scope.entry(*sid).or_default().push(TaskNode {
             id: *tid,
             priority: match pri {
@@ -1057,6 +1063,8 @@ pub fn scope_tree() -> Vec<ScopeTreeNode> {
                 Priority::Low => "L",
             },
             queued: queued.contains(tid),
+            total_poll_count: poll_count,
+            last_poll_duration_us: last_us,
         });
     }
 

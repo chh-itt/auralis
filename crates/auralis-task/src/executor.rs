@@ -229,6 +229,10 @@ struct TaskState {
     /// Key in [`Executor::timers`] for this task's pending sleep,
     /// or 0 if the task is not waiting on a timer.
     timer_deadline: u64,
+    /// Number of times this task has been polled.
+    total_poll_count: u64,
+    /// Microseconds spent in the most recent poll.
+    last_poll_duration_us: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +603,8 @@ impl Executor {
                 priority: Priority::Low,
                 scope_id: 0,
                 timer_deadline: 0,
+                total_poll_count: 0,
+                last_poll_duration_us: 0,
             });
             e.enqueue(tid);
             e.try_schedule_flush()
@@ -773,12 +779,14 @@ impl Executor {
                 // doesn't leave the outer task without its id afterward.
                 let prev_polling = CURRENT_POLLING_TASK.with(|c| c.replace(Some(tid)));
 
-                // Task isolation — prevents a panicking task from
-                // unwinding through flush and leaving in_flush set.
+                // Task isolation + timing.
+                state.total_poll_count = state.total_poll_count.wrapping_add(1);
+                let t0 = auralis_signal::now_us();
                 let result: Result<Poll<()>, Box<dyn std::any::Any + Send>> =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         state.future.as_mut().poll(&mut cx)
                     }));
+                let elapsed = auralis_signal::now_us().saturating_sub(t0);
 
                 CURRENT_POLLING_TASK.with(|c| c.set(prev_polling));
                 crate::scope::set_scope_direct(prev_scope);
@@ -788,6 +796,7 @@ impl Executor {
                 // read it because the slot is already None).
                 let timer_dl = state.timer_deadline;
 
+                state.last_poll_duration_us = elapsed;
                 match result {
                     Ok(Poll::Ready(())) => {
                         if timer_dl != 0 {
@@ -799,7 +808,6 @@ impl Executor {
                         if timer_dl != 0 {
                             ex.borrow_mut().cleanup_timer(tid, timer_dl);
                         }
-                        // Notify the panic hook (if any) before freeing the slot.
                         let hook = ex.borrow().panic_hook.clone();
                         if let Some(h) = hook {
                             h(PanicInfo {
@@ -1142,6 +1150,8 @@ fn spawn_inner_on(
             priority,
             scope_id,
             timer_deadline: 0,
+            total_poll_count: 0,
+            last_poll_duration_us: 0,
         });
         e.enqueue(task_id);
         let sched = e.try_schedule_flush();
@@ -1414,6 +1424,21 @@ pub(crate) fn debug_task_count() -> usize {
     EXECUTOR.with(|exec| exec.borrow().tasks.iter().filter(|t| t.is_some()).count())
 }
 
+/// Return timing info for all active tasks: `task_id` → (`total_poll_count`, `last_poll_us`).
+#[cfg(feature = "debug")]
+pub(crate) fn debug_task_timing() -> std::collections::HashMap<TaskId, (u64, u64)> {
+    EXECUTOR.with(|exec| {
+        let ex = exec.borrow();
+        let mut map = std::collections::HashMap::new();
+        for (idx, slot) in ex.tasks.iter().enumerate() {
+            if let Some(ref t) = slot {
+                map.insert(idx as u64, (t.total_poll_count, t.last_poll_duration_us));
+            }
+        }
+        map
+    })
+}
+
 /// Return a snapshot of all active tasks: `(task_id, priority, scope_id)`.
 #[cfg(feature = "debug")]
 pub(crate) fn debug_task_snapshot() -> Vec<(TaskId, Priority, u64)> {
@@ -1461,6 +1486,8 @@ pub(crate) fn spawn_no_auto_flush(
             priority,
             scope_id: 0,
             timer_deadline: 0,
+            total_poll_count: 0,
+            last_poll_duration_us: 0,
         });
         ex.enqueue(task_id);
         // Do NOT schedule flush.

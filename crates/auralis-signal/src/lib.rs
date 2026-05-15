@@ -82,7 +82,7 @@ pub use batch::{batch, in_batch};
 pub use future::{FilterChangedFuture, MapChangedFuture, SignalChangedFuture};
 pub use memo::Memo;
 pub use signal::{
-    add_schedule_observer, add_schedule_observer_with_identity, install_timing_hook,
+    add_schedule_observer, add_schedule_observer_with_identity, install_timing_hook, now_us,
     remove_schedule_observer, ObserverToken,
 };
 #[doc(hidden)]
