@@ -31,8 +31,7 @@ pub fn serve() {
         let rx = change_stream();
         loop {
             let _ = rx.wait_timeout(Duration::from_millis(200));
-            if let Some(seq) = rx.drain_latest_seq() {
-                timeline.record(seq);
+            if rx.drain_into(&timeline) {
                 send_snapshot(&mut ws, &timeline);
             }
         }

@@ -48,7 +48,7 @@ td.addr{color:#484f58;font-size:9px}
     <div class="dt-panel" style="max-width:300px">
       <h2>Signals</h2>
       <table>
-        <thead><tr><th>Label</th><th>Ver</th><th>Δ</th><th>Subs</th><th>Watched By</th></tr></thead>
+        <thead><tr><th>Label</th><th>Type</th><th>Ver</th><th>Updates</th><th>Δ</th><th>Subs</th><th>Watched By</th></tr></thead>
         <tbody id="dt-sigs-body"></tbody>
       </table>
     </div>
@@ -97,8 +97,9 @@ function render(snap) {
     const delta = s.version - prev;
     const cls = delta > 0 ? 'style="color:#3fb950;font-weight:bold"' : '';
     const dStr = delta > 0 ? '+'+delta : (delta < 0 ? ''+delta : '·');
+    const tn = (s.type_name||'').split('::').pop() || '?';
     lastVers[s.addr] = s.version;
-    return '<tr><td>'+esc(s.label||'(unnamed)')+'</td><td>'+s.version+'</td><td '+cls+'>'+dStr+'</td><td>'+s.subscriber_count+
+    return '<tr><td>'+esc(s.label||'(unnamed)')+'</td><td style="color:#484f58;font-size:10px">'+esc(tn)+'</td><td>'+s.version+'</td><td>'+s.update_count+'</td><td '+cls+'>'+dStr+'</td><td>'+s.subscriber_count+
     '</td><td>'+(s.subscribed_by||[]).map(a=>esc(addrToLabel[a]||a.slice(0,8)+'…')).join(', ')+'</td></tr>';
   }).join('');
 

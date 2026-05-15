@@ -332,8 +332,7 @@ impl<T: Clone + 'static> Memo<T> {
         let new_subs: SubscriptionList = Rc::new(RefCell::new(Vec::new()));
         let holder = Rc::new(RefCell::new(Some(self.signal.clone())));
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let t0 = std::time::Instant::now();
+        let t0 = crate::signal::now_us();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_compute(
                 &self.compute,
@@ -347,18 +346,6 @@ impl<T: Clone + 'static> Memo<T> {
 
         match result {
             Ok((new_value, _all_seen, re_read_keys)) => {
-                // --- Incremental subscription diff ---
-                //
-                // `re_read_keys`: old dependencies that were actually
-                // re-accessed during this compute.
-                //
-                // `new_subs`: subscriptions for signals that were NOT
-                // in pre-seen (genuinely new dependencies).
-                //
-                // Effective read set = new_subs_keys ∪ re_read_keys.
-                // Old subscriptions in this set are kept; those not in
-                // it are removed (no longer dependencies).
-
                 let new_keys: HashSet<SignalKey> =
                     new_subs.borrow().iter().map(|(k, _)| *k).collect();
                 let effective_read: HashSet<SignalKey> =
@@ -392,14 +379,8 @@ impl<T: Clone + 'static> Memo<T> {
                 self.dirty.set(false);
                 self.compute_count
                     .set(self.compute_count.get().wrapping_add(1));
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        let elapsed_us = t0.elapsed().as_micros() as u64;
-                        self.last_compute_us.set(elapsed_us);
-                    }
-                }
+                let elapsed_us = crate::signal::now_us().saturating_sub(t0);
+                self.last_compute_us.set(elapsed_us);
             }
             Err(payload) => {
                 // Compute panicked — clean up partial new subscriptions.

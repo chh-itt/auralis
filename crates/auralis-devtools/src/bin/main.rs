@@ -39,7 +39,12 @@ fn cmd_stream() {
         let _ = rx.wait_timeout(Duration::from_millis(500));
         let current = rx.current_seq();
         if current != last {
-                        let event = auralis_devtools::stream::ChangeEvent { seq: current, addr: 0, version: 0, ms_since_start: 0 };
+            let event = auralis_devtools::stream::ChangeEvent {
+                seq: current,
+                addr: 0,
+                version: 0,
+                ms_since_start: 0,
+            };
             let line = serde_json::to_string(&event).expect("serialization should not fail");
             println!("{line}");
             let _ = io::stdout().flush();
@@ -82,7 +87,12 @@ fn cmd_serve() {
             let _ = rx.wait_timeout(Duration::from_millis(200));
             let current = rx.current_seq();
             if current != last {
-                            let event = auralis_devtools::stream::ChangeEvent { seq: current, addr: 0, version: 0, ms_since_start: 0 };
+                let event = auralis_devtools::stream::ChangeEvent {
+                    seq: current,
+                    addr: 0,
+                    version: 0,
+                    ms_since_start: 0,
+                };
                 let line = serde_json::to_string(&event).expect("serialization");
                 if ws.send(tungstenite::Message::Text(line.into())).is_err() {
                     break; // client disconnected

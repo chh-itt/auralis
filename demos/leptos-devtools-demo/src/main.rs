@@ -13,6 +13,16 @@ use app::App;
 
 fn main() {
     console_error_panic_hook::set_once();
+
+    // Install WASM-compatible timing for Memo recompute profiling.
+    auralis_signal::install_timing_hook(|| {
+        let ms = js_sys::eval("performance.now()")
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        (ms * 1000.0) as u64 // ms → µs
+    });
+
     mount_to_body(|| view! { <App/> });
     init_devtools_bridge();
 }

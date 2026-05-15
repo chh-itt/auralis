@@ -17,7 +17,12 @@ use serde::Serialize;
 pub struct TimelineEntry {
     /// Monotonic sequence number from the change stream.
     pub seq: u64,
-    /// Wall-clock instant (not serialized — use `ms_since_start` instead).
+    /// Opaque address of the signal that changed, if identity is
+    /// available (requires identity-aware observer).
+    pub addr: Option<usize>,
+    /// New version number of the changed signal.
+    pub version: Option<u64>,
+    /// Wall-clock instant (not serialized).
     #[serde(skip)]
     pub at: Instant,
     /// Milliseconds since the timeline was created.
@@ -44,8 +49,17 @@ impl Timeline {
         })
     }
 
-    /// Record a change event with the given sequence number.
+    /// Record a change event (no identity).
     pub fn record(&self, seq: u64) {
+        self.record_event(seq, None, None);
+    }
+
+    /// Record a change with signal identity (`addr`, `new_version`).
+    pub fn record_with_identity(&self, seq: u64, addr: usize, version: u64) {
+        self.record_event(seq, Some(addr), Some(version));
+    }
+
+    fn record_event(&self, seq: u64, addr: Option<usize>, version: Option<u64>) {
         let now = Instant::now();
         let mut entries = self.entries.borrow_mut();
         if entries.len() >= self.capacity {
@@ -53,6 +67,8 @@ impl Timeline {
         }
         entries.push_back(TimelineEntry {
             seq,
+            addr,
+            version,
             at: now,
             ms_since_start: {
                 #[allow(clippy::cast_possible_truncation)]

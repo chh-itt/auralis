@@ -836,7 +836,7 @@ enum ObserverFn {
     /// Legacy no-arg observer.
     Legacy(Box<dyn Fn()>),
     /// Identity-aware observer: receives the mutated signal's
-    /// state_addr and new version.
+    /// `state_addr` and new version.
     Identity(Box<dyn Fn(usize, u64)>),
 }
 
@@ -908,9 +908,8 @@ pub fn add_schedule_observer(observer: Box<dyn Fn()>) -> ObserverToken {
 
 /// Like [`add_schedule_observer`], but the observer receives the
 /// mutated signal's `state_addr` and new version number.
-pub fn add_schedule_observer_with_identity(
-    observer: Box<dyn Fn(usize, u64)>,
-) -> ObserverToken {
+#[must_use]
+pub fn add_schedule_observer_with_identity(observer: Box<dyn Fn(usize, u64)>) -> ObserverToken {
     add_observer(ObserverFn::Identity(observer))
 }
 
@@ -921,7 +920,10 @@ fn add_observer(f: ObserverFn) -> ObserverToken {
             if slot.observer.is_none() {
                 let gen = slot.generation;
                 slot.observer = Some(f);
-                return ObserverToken { index: i, generation: gen };
+                return ObserverToken {
+                    index: i,
+                    generation: gen,
+                };
             }
         }
         let idx = observers.len();
@@ -929,7 +931,10 @@ fn add_observer(f: ObserverFn) -> ObserverToken {
             observer: Some(f),
             generation: 0,
         });
-        ObserverToken { index: idx, generation: 0 }
+        ObserverToken {
+            index: idx,
+            generation: 0,
+        }
     })
 }
 
@@ -1006,6 +1011,56 @@ fn notify_schedule_observers(addr: usize, version: u64) {
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Timing hook — installable by the host for WASM performance.now()
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static TIMING_HOOK: RefCell<Option<fn() -> u64>> = RefCell::new(None);
+}
+
+/// Install a microsecond-precision timer hook.
+///
+/// On native platforms `std::time::Instant` is used by default.
+/// On WASM, call this with a function that returns
+/// `performance.now() * 1000.0` to enable Memo recompute timing.
+pub fn install_timing_hook(hook: fn() -> u64) {
+    TIMING_HOOK.with(|c| *c.borrow_mut() = Some(hook));
+}
+
+/// Return the current time in microseconds, or 0 if no hook is
+/// installed and the platform doesn't support `Instant`.
+pub(crate) fn now_us() -> u64 {
+    TIMING_HOOK.with(|c| {
+        if let Some(hook) = c.borrow().as_ref() {
+            return hook();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Use a static base time to get relative microseconds.
+            use std::cell::Cell;
+            thread_local! {
+                static T0: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+            }
+            let now = std::time::Instant::now();
+            let base = T0.with(|t| {
+                t.get().unwrap_or_else(|| {
+                    t.set(Some(now));
+                    now
+                })
+            });
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                (now - base).as_micros() as u64
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
