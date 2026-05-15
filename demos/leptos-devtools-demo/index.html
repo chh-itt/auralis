@@ -121,7 +121,7 @@ function render(snap) {
 
   renderGraph(snap.signals, snap.memos);
   renderComponents(snap.component_tree || []);
-  renderTasks();
+  renderTasks(snap.scope_tree || []);
   renderTimeline(snap.timeline || []);
 }
 
@@ -141,8 +141,7 @@ function renderComponents(tree) {
   el.innerHTML = tree.map(function(n){return node(n,0)}).join('');
 }
 
-function renderTasks() {
-  var tree = snapData.scope_tree || [];
+function renderTasks(tree) {
   var totalTasks = 0;
   function node(n, depth) {
     var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px">';
