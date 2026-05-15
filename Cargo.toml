@@ -2,6 +2,7 @@
 members = [
     "crates/auralis-signal",
     "crates/auralis-task",
+    "crates/auralis-devtools",
 ]
 resolver = "2"
 
@@ -14,8 +15,9 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 # Internal
-auralis-signal = { path = "crates/auralis-signal", version = "0.1.11" }
-auralis-task   = { path = "crates/auralis-task", version = "0.1.11" }
+auralis-signal  = { path = "crates/auralis-signal", version = "0.1.11" }
+auralis-task    = { path = "crates/auralis-task", version = "0.1.11" }
+auralis-devtools = { path = "crates/auralis-devtools", version = "0.1.11" }
 
 [profile.release]
 opt-level     = "s"

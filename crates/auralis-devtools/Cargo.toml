@@ -1,0 +1,19 @@
+[package]
+name = "auralis-devtools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Diagnostic DevTools for the Auralis reactive kernel — JSON snapshots, real-time change streams, and CLI inspection"
+repository.workspace = true
+
+[features]
+default = []
+ws-transport = ["dep:tungstenite"]
+
+[dependencies]
+auralis-signal = { workspace = true, features = ["diagnostics"] }
+auralis-task = { workspace = true, features = ["debug"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.28", optional = true }

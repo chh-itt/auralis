@@ -211,6 +211,14 @@ crates/
       counter.rs        # 可运行的 CLI 示例
     tests/
       signal_task_integration.rs  # 跨 crate 集成测试
+  auralis-devtools/      # 诊断 DevTools — JSON 快照、变更流、CLI
+    src/
+      snapshot.rs         # ReactiveSnapshot、snapshot()
+      stream.rs           # ChangeReceiver、change_stream()
+    src/bin/
+      main.rs             # CLI: dump / stream / serve
+    tests/
+      snapshot_test.rs    # 集成测试
 demos/
   egui-demo/            # Auralis vs 纯 egui 对比演示
     examples/
@@ -231,6 +239,7 @@ docs/
 | `debug` | `auralis-task` | `dump_reactive_graph()` — signal、memo 和 task 统一快照；同时启用 `auralis-signal/diagnostics` |
 | `diagnostics` | `auralis-signal` | 响应式节点注册表、`ReactiveNodeSnapshot`、`dump_registry()` |
 | `ssr-tokio` | `auralis-task` | Tokio task-local 存储，多请求 SSR 隔离 |
+| `ws-transport` | `auralis-devtools` | WebSocket 服务（`serve` 命令），需要 `tungstenite` |
 
 ## 运行
 

@@ -13,8 +13,8 @@ use crate::signal::SignalState;
 /// A snapshot of a reactive node's metadata for diagnostic output.
 ///
 /// Returned by [`dump_registry`].  Memo-specific fields
-/// (`is_dirty`, `compute_count`, `dependency_count`) are `None`
-/// for signals.
+/// (`is_dirty`, `compute_count`, `dependency_count`,
+/// `dependency_addrs`) are `None` for signals.
 #[derive(Debug, Clone)]
 pub struct ReactiveNodeSnapshot {
     /// The label set via `set_label()`, or `None` if unlabelled.
@@ -34,6 +34,9 @@ pub struct ReactiveNodeSnapshot {
     pub compute_count: Option<u64>,
     /// Number of source signal dependencies (`None` for signals).
     pub dependency_count: Option<usize>,
+    /// Addresses of this memo's source signal dependencies
+    /// (`None` for signals, empty if the memo has no deps).
+    pub dependency_addrs: Option<Vec<usize>>,
 }
 
 type RegistryCallback = Box<dyn Fn() -> Option<ReactiveNodeSnapshot>>;
@@ -101,6 +104,7 @@ pub(crate) fn make_signal_callback<T: 'static>(
             is_dirty: None,
             compute_count: None,
             dependency_count: None,
+            dependency_addrs: None,
         })
     })
 }
@@ -119,7 +123,9 @@ pub(crate) fn make_memo_callback<T: 'static>(
         let subs = weak_subs.upgrade()?;
         let signal_state = weak_signal.upgrade()?;
         let s = signal_state.borrow();
-        let dep_count = subs.borrow().len();
+        let sub_list = subs.borrow();
+        let dep_count = sub_list.len();
+        let dep_addrs: Vec<usize> = sub_list.iter().map(|(key, _)| key.addr()).collect();
         Some(ReactiveNodeSnapshot {
             label: label.borrow().clone(),
             node_type: "Memo",
@@ -129,6 +135,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
             is_dirty: Some(dirty.get()),
             compute_count: Some(compute_count.get()),
             dependency_count: Some(dep_count),
+            dependency_addrs: Some(dep_addrs),
         })
     })
 }

@@ -680,6 +680,29 @@ fn memo_dependency_diff_large_scale_swap() {
 }
 
 #[test]
+fn memo_dependency_addrs_returns_source_addresses() {
+    let a = Signal::new(1);
+    let b = Signal::new(2);
+    let a2 = a.clone();
+    let b2 = b.clone();
+    let memo = Memo::new(move || a2.read() + b2.read());
+
+    let addrs = memo.dependency_addrs();
+    assert_eq!(addrs.len(), 2, "should have two source dependencies");
+    // Both a and b should be in the dependency list.
+    let a_addr = a.state_addr();
+    let b_addr = b.state_addr();
+    assert!(addrs.contains(&a_addr), "should contain a's address");
+    assert!(addrs.contains(&b_addr), "should contain b's address");
+
+    // After recomputation, the addresses should be stable.
+    a.set(10);
+    let _ = memo.read();
+    let addrs2 = memo.dependency_addrs();
+    assert_eq!(addrs2.len(), 2);
+}
+
+#[test]
 fn memo_label_set_and_get() {
     let sig = Signal::new(1);
     let memo = Memo::new(move || sig.read() * 2);

@@ -85,6 +85,10 @@ impl SignalKey {
             addr: sig.state_addr(),
         }
     }
+
+    pub(crate) fn addr(self) -> usize {
+        self.addr
+    }
 }
 
 /// A lazy, auto-tracking computed signal.
@@ -247,6 +251,22 @@ impl<T: Clone + 'static> Memo<T> {
     #[must_use]
     pub fn compute_count(&self) -> u64 {
         self.compute_count.get()
+    }
+
+    /// Return the opaque addresses of this memo's source signal
+    /// dependencies, for use by diagnostic tools.
+    ///
+    /// Each address corresponds to the `state_addr` of a [`Signal`]
+    /// that this memo reads during compute.  The returned set reflects
+    /// the current dependency snapshot — it only updates after a
+    /// successful recomputation.
+    #[must_use]
+    pub fn dependency_addrs(&self) -> Vec<usize> {
+        self.subscriptions
+            .borrow()
+            .iter()
+            .map(|(key, _)| key.addr())
+            .collect()
     }
 
     /// Set a human-readable label for this memo.

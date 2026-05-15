@@ -6,7 +6,8 @@
 auralis/
 ├── crates/
 │   ├── auralis-signal/    # Signal<T>, Memo<T>, batch(), change-detection futures
-│   └── auralis-task/      # TaskScope tree, priority executor, cancellation, context DI
+│   ├── auralis-task/      # TaskScope tree, priority executor, cancellation, context DI
+│   └── auralis-devtools/  # Diagnostic DevTools: JSON snapshots, change streams, CLI
 ├── tests/                 # Cross-crate integration tests
 ├── examples/              # Runnable examples
 └── docs/                  # Design documentation
@@ -245,6 +246,38 @@ Scope 1 "root":
 
 `dump_task_tree()` remains available as a backward-compatible alias.
 
+## auralis-devtools: Inspection & Diagnostics
+
+### Modules
+
+| File | Responsibility |
+|------|---------------|
+| `snapshot.rs` | `ReactiveSnapshot` struct, `snapshot()` — calls `dump_registry()` and formats a JSON-serializable snapshot including memo dependency addresses |
+| `stream.rs` | `ChangeReceiver`, `change_stream()` — installs a schedule observer, delivers change events through an `mpsc` channel for efficient blocking via `wait_timeout()` |
+| `main.rs` (bin) | CLI: `dump` (one-shot JSON to stdout), `stream` (change events to stdout), `serve` (WebSocket server, requires `ws-transport` feature) |
+
+### Data Flow
+
+```
+Signal mutation → notify_schedule_observers()
+  → change_stream observer increments seq + mpsc send
+  → ChangeReceiver::wait_timeout() wakes up
+  → caller calls snapshot() → dump_registry() → JSON
+```
+
+### CLI Usage
+
+```bash
+# One-shot snapshot
+cargo run -p auralis-devtools -- dump
+
+# Pipe-friendly change stream
+cargo run -p auralis-devtools -- stream
+
+# WebSocket server (requires ws-transport feature)
+cargo run -p auralis-devtools --features ws-transport -- serve
+```
+
 ## Feature Flags
 
 | Feature | Crate | Enables |
@@ -252,6 +285,7 @@ Scope 1 "root":
 | `debug` | `auralis-task` | `dump_reactive_graph()` + reactive node registry (forwards to `auralis-signal/diagnostics`) |
 | `diagnostics` | `auralis-signal` | Reactive node registry, `ReactiveNodeSnapshot`, `dump_registry()` |
 | `ssr-tokio` | `auralis-task` | `init_scope_store_tokio()` for tokio task-local storage |
+| `ws-transport` | `auralis-devtools` | WebSocket server for `auralis-devtools serve` (adds `tungstenite`) |
 
 ## Build Configuration
 

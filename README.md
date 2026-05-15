@@ -219,6 +219,14 @@ crates/
       counter.rs        # Runnable CLI demo
     tests/
       signal_task_integration.rs  # Cross-crate integration tests
+  auralis-devtools/      # Diagnostic DevTools — JSON snapshots, change streams, CLI
+    src/
+      snapshot.rs         # ReactiveSnapshot, snapshot()
+      stream.rs           # ChangeReceiver, change_stream()
+    src/bin/
+      main.rs             # CLI: dump / stream / serve
+    tests/
+      snapshot_test.rs    # Integration tests
 demos/
   egui-demo/            # Auralis vs plain egui comparison
     examples/
@@ -239,6 +247,7 @@ docs/
 | `debug` | `auralis-task` | `dump_reactive_graph()` — signals, memos, and tasks in one snapshot; also enables `auralis-signal/diagnostics` |
 | `diagnostics` | `auralis-signal` | Reactive node registry, `ReactiveNodeSnapshot`, `dump_registry()` |
 | `ssr-tokio` | `auralis-task` | Tokio task-local storage for multi-request SSR |
+| `ws-transport` | `auralis-devtools` | WebSocket server (`serve` command) via `tungstenite` |
 
 ## Running
 
