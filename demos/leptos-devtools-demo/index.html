@@ -59,6 +59,10 @@ td.addr{color:#484f58;font-size:9px}
         <tbody id="dt-memos-body"></tbody>
       </table>
     </div>
+    <div class="dt-panel" style="max-width:260px">
+      <h2>Component Tree</h2>
+      <div id="dt-components" style="font-size:10px"></div>
+    </div>
     <div class="dt-panel">
       <h2>Dependency Graph</h2>
       <svg id="dt-graph"></svg>
@@ -116,6 +120,60 @@ function render(snap) {
   }).join('');
 
   renderGraph(snap.signals, snap.memos);
+  renderComponents(snap.component_tree || []);
+  renderTasks();
+  renderTimeline(snap.timeline || []);
+}
+
+function renderComponents(tree) {
+  var el = document.getElementById('dt-components');
+  if (!tree || !tree.length) { el.innerHTML = '<span style="color:#484f58">(no components)</span>'; return; }
+  function node(n, depth) {
+    var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px;margin-bottom:2px">';
+    h += '<span style="color:#58a6ff">'+esc(n.label)+'</span>';
+    if (n.signal_addrs && n.signal_addrs.length) {
+      h += ' <span style="color:#484f58;font-size:9px">('+n.signal_addrs.length+' signals)</span>';
+    }
+    if (n.children) for (var i=0;i<n.children.length;i++) h += node(n.children[i], depth+1);
+    h += '</div>';
+    return h;
+  }
+  el.innerHTML = tree.map(function(n){return node(n,0)}).join('');
+}
+
+function renderTasks() {
+  var tree = snapData.scope_tree || [];
+  var totalTasks = 0;
+  function node(n, depth) {
+    var h = '<div style="margin-left:'+(depth*12)+'px;border-left:1px solid #21262d;padding-left:8px">';
+    h += '<span style="color:#58a6ff">Scope '+n.id+'</span>';
+    if (n.label) h += ' <span style="color:#c9d1d9">"'+esc(n.label)+'"</span>';
+    totalTasks += (n.tasks||[]).length;
+    for (var i=0;i<(n.tasks||[]).length;i++) {
+      var t = n.tasks[i];
+      h += '<div style="margin-left:12px;font-size:10px;color:#8b949e">task '+t.id+' ['+t.priority+'] '+(t.queued?'<span style="color:#3fb950">queued</span>':'<span style="color:#484f58">waiting</span>')+' polls:'+t.total_poll_count+'</div>';
+    }
+    if (n.children) for (var j=0;j<n.children.length;j++) h += node(n.children[j], depth+1);
+    h += '</div>';
+    return h;
+  }
+  document.getElementById('task-tree').innerHTML = tree.map(function(n){return node(n,0)}).join('') || '<span style="color:#484f58">(no tasks)</span>';
+  document.getElementById('task-count').innerHTML = 'Tasks: <b>'+totalTasks+'</b>';
+}
+
+function renderTimeline(timeline) {
+  var bar = document.getElementById('timeline-bar');
+  var MAX = 60;
+  var entries = timeline.slice(-MAX);
+  bar.innerHTML = '';
+  for (var i = 0; i < MAX; i++) {
+    var tick = document.createElement('span');
+    tick.className = 'tick' + (i < entries.length ? ' active' : '');
+    if (i < entries.length) {
+      tick.title = 'seq ' + entries[i].seq + ' @ ' + entries[i].ms_since_start + 'ms';
+    }
+    bar.appendChild(tick);
+  }
 }
 
 function renderGraph(signals, memos) {
