@@ -20,13 +20,23 @@ th,td{padding:3px 6px;text-align:left;border-bottom:1px solid #21262d;white-spac
 th{color:#8b949e;font-weight:normal;position:sticky;top:28px;background:#0d1117}
 td.addr{color:#484f58;font-size:10px}
 tr:hover{background:#161b22}
-.bar{display:inline-block;height:6px;border-radius:3px;background:#30363d;min-width:4px}
-.bar-fill{height:100%;border-radius:3px}
-#dep-graph{width:100%;height:calc(100vh - 60px)}
-.graph-sig{fill:#58a6ff}
-.graph-memo{fill:#3fb950}
-.graph-edge{stroke:#30363d;stroke-width:1;fill:none}
-.graph-label{fill:#c9d1d9;font-size:9px}
+#graph-panel{position:relative;overflow:hidden}
+#dep-graph{width:100%;height:100%}
+.graph-sig{fill:#58a6ff;stroke:#0d1117;stroke-width:1.5}
+.graph-memo{fill:#3fb950;stroke:#0d1117;stroke-width:1.5}
+.graph-edge{stroke:#30363d;stroke-width:1.2;fill:none;stroke-opacity:0.7}
+.graph-edge-highlight{stroke:#f0883e;stroke-width:2;stroke-opacity:1}
+.graph-label{fill:#c9d1d9;font-size:9px;pointer-events:none;text-anchor:middle}
+.graph-label-bg{fill:#0d1117;opacity:0.8}
+#tooltip{position:absolute;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-size:11px;pointer-events:none;display:none;z-index:10;max-width:240px}
+#tooltip .tt-label{color:#58a6ff;font-weight:bold;margin-bottom:2px}
+#tooltip .tt-row{color:#8b949e}
+#tooltip .tt-row b{color:#c9d1d9}
+.legend{position:absolute;bottom:8px;left:8px;display:flex;gap:12px;font-size:10px;color:#8b949e}
+.legend span{display:flex;align-items:center;gap:4px}
+.legend .dot{width:8px;height:8px;border-radius:50%}
+.legend .dot-sig{background:#58a6ff}
+.legend .dot-memo{background:#3fb950}
 .status{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px}
 .status-alive{background:#3fb950}
 .status-dead{background:#f85149}
@@ -60,6 +70,11 @@ tr:hover{background:#161b22}
   <div class="panel" id="graph-panel">
     <h2>Dependency Graph</h2>
     <svg id="dep-graph"></svg>
+    <div id="tooltip"></div>
+    <div class="legend">
+      <span><span class="dot dot-sig"></span> Signal</span>
+      <span><span class="dot dot-memo"></span> Memo</span>
+    </div>
   </div>
   <div class="panel" id="tasks-panel">
     <h2>Task Tree</h2>
@@ -67,9 +82,11 @@ tr:hover{background:#161b22}
   </div>
 </div>
 
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const WS_URL = 'ws://127.0.0.1:9642';
 let addrToLabel = {};
+let snapData = null;
 
 function connect() {
   const ws = new WebSocket(WS_URL);
@@ -86,14 +103,10 @@ function setStatus(ok) {
 }
 
 function render(snap) {
-  // Build addr → label map
+  snapData = snap;
   addrToLabel = {};
-  for (const s of snap.signals) {
-    if (s.label) addrToLabel[s.addr] = s.label;
-  }
-  for (const m of snap.memos) {
-    if (m.label) addrToLabel[m.addr] = m.label;
-  }
+  for (const s of snap.signals) if (s.label) addrToLabel[s.addr] = s.label;
+  for (const m of snap.memos) if (m.label) addrToLabel[m.addr] = m.label;
 
   renderSignals(snap.signals);
   renderMemos(snap.memos);
@@ -105,8 +118,7 @@ function render(snap) {
 }
 
 function renderSignals(signals) {
-  const tbody = document.getElementById('signals-body');
-  tbody.innerHTML = signals.map(s => `
+  document.getElementById('signals-body').innerHTML = signals.map(s => `
     <tr>
       <td>${esc(s.label || '(unnamed)')}</td>
       <td>${s.version}</td>
@@ -116,75 +128,156 @@ function renderSignals(signals) {
 }
 
 function renderMemos(memos) {
-  const tbody = document.getElementById('memos-body');
-  tbody.innerHTML = memos.map(m => `
+  document.getElementById('memos-body').innerHTML = memos.map(m => `
     <tr>
       <td>${esc(m.label || '(unnamed)')}</td>
       <td>${m.version}</td>
       <td>${m.subscriber_count}</td>
       <td>${m.is_dirty ? '⚠' : '✓'}</td>
       <td class="${m.compute_count > 100000 ? 'computed-high' : ''}">${m.compute_count}</td>
-      <td>${m.dependency_addrs.map(a => short(a)).join(', ')}</td>
+      <td>${m.dependency_addrs.map(a => esc(addrToLabel[a] || short(a))).join(', ')}</td>
       <td class="addr">${m.addr}</td>
     </tr>`).join('');
 }
 
+// ── D3 Force Graph ────────────────────────────────────────────────
+
+let simActive = false;
+
 function renderGraph(signals, memos) {
-  const svg = document.getElementById('dep-graph');
-  const W = svg.clientWidth || 600;
-  const H = svg.clientHeight || 500;
+  const svg = d3.select('#dep-graph');
+  const W = svg.node().clientWidth || 600;
+  const H = svg.node().clientHeight || 500;
 
-  // Layout: signals on left, memos on right.
+  // Build graph data
   const nodes = [];
-  const sigX = 60, memoX = W - 120;
-  const rowH = 22;
-  let sy = 20, my = 20;
+  const edges = [];
+  const nodeMap = {};
 
-  // Signal nodes
   for (const s of signals) {
-    if (!addrToLabel[s.addr]) continue; // skip unnamed (memo internals)
-    nodes.push({ id: s.addr, label: addrToLabel[s.addr] || s.addr, x: sigX, y: sy, type: 'signal' });
-    sy += rowH;
+    const label = addrToLabel[s.addr];
+    if (!label) continue;
+    const n = { id: s.addr, label, type: 'signal', subs: s.subscriber_count, ver: s.version };
+    nodes.push(n);
+    nodeMap[s.addr] = n;
   }
-
-  // Memo nodes
-  const memoNodeMap = {};
   for (const m of memos) {
-    const label = addrToLabel[m.addr] || m.label || m.addr;
-    nodes.push({ id: m.addr, label: label, x: memoX, y: my, type: 'memo' });
-    memoNodeMap[m.addr] = { y: my, deps: m.dependency_addrs };
-    my += rowH;
-  }
-
-  // Edges
-  let edges = '';
-  for (const m of memos) {
-    const info = memoNodeMap[m.addr];
-    if (!info) continue;
-    for (const depAddr of m.dependency_addrs) {
-      const src = nodes.find(n => n.id === depAddr);
-      if (src) {
-        edges += `<line x1="${src.x + 50}" y1="${src.y + 6}" x2="${info.y > 0 ? memoX : memoX}" y2="${info.y + 6}" class="graph-edge"/>`;
-      }
+    const label = addrToLabel[m.addr] || m.label || short(m.addr);
+    const n = { id: m.addr, label, type: 'memo', subs: m.subscriber_count, ver: m.version,
+      dirty: m.is_dirty, computed: m.compute_count, deps: m.dependency_addrs };
+    nodes.push(n);
+    nodeMap[m.addr] = n;
+    for (const dep of m.dependency_addrs) {
+      if (nodeMap[dep]) edges.push({ source: dep, target: m.addr });
     }
   }
 
-  // Nodes
-  let circles = '';
-  let labels = '';
-  for (const n of nodes) {
-    const cls = n.type === 'signal' ? 'graph-sig' : 'graph-memo';
-    const r = n.type === 'signal' ? 4 : 5;
-    circles += `<circle cx="${n.x}" cy="${n.y + 6}" r="${r}" class="${cls}"/>`;
-    labels += `<text x="${n.x + 10}" y="${n.y + 10}" class="graph-label">${esc(n.label)}</text>`;
-  }
+  svg.selectAll('*').remove();
 
-  svg.innerHTML = edges + circles + labels;
+  // Zoom
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', (e) => g.attr('transform', e.transform)));
+
+  // Arrow marker
+  g.append('defs').append('marker')
+    .attr('id', 'arrow').attr('viewBox', '0 -4 8 8')
+    .attr('refX', 14).attr('refY', 0).attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#30363d');
+
+  // Edges
+  const link = g.append('g').selectAll('line').data(edges).join('line')
+    .attr('class', 'graph-edge').attr('marker-end', 'url(#arrow)');
+
+  // Nodes
+  const node = g.append('g').selectAll('g').data(nodes).join('g')
+    .attr('cursor', 'grab')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  node.append('circle')
+    .attr('r', d => d.type === 'signal' ? 6 : 7)
+    .attr('class', d => d.type === 'signal' ? 'graph-sig' : 'graph-memo');
+
+  node.append('text')
+    .attr('dy', d => d.type === 'signal' ? -10 : -11)
+    .attr('class', 'graph-label')
+    .text(d => d.label);
+
+  // Tooltip
+  const tip = d3.select('#tooltip');
+  node.on('mouseenter', (e, d) => {
+    tip.style('display', 'block').html(`
+      <div class="tt-label">${esc(d.label)}</div>
+      <div class="tt-row">type: <b>${d.type}</b></div>
+      <div class="tt-row">ver: <b>${d.ver}</b>  subs: <b>${d.subs}</b></div>
+      ${d.type === 'memo' ? `
+      <div class="tt-row">dirty: <b>${d.dirty}</b>  computed: <b>${d.computed}x</b></div>
+      <div class="tt-row">deps: <b>${d.deps.length}</b></div>` : ''}
+    `);
+  }).on('mousemove', (e) => {
+    const box = svg.node().getBoundingClientRect();
+    tip.style('left', (e.clientX - box.left + 12) + 'px')
+       .style('top', (e.clientY - box.top - 10) + 'px');
+  }).on('mouseleave', () => tip.style('display', 'none'));
+
+  // Click: highlight upstream + downstream
+  node.on('click', (e, d) => {
+    const upstream = new Set([d.id]);
+    const downstream = new Set([d.id]);
+    // BFS upstream
+    let q = [d.id]; while (q.length) {
+      const cur = q.shift();
+      for (const ed of edges) {
+        if (ed.target === cur && !upstream.has(ed.source)) {
+          upstream.add(ed.source); q.push(ed.source);
+        }
+      }
+    }
+    // BFS downstream
+    q = [d.id]; while (q.length) {
+      const cur = q.shift();
+      for (const ed of edges) {
+        if (ed.source === cur && !downstream.has(ed.target)) {
+          downstream.add(ed.target); q.push(ed.target);
+        }
+      }
+    }
+    const all = new Set([...upstream, ...downstream]);
+    node.select('circle').attr('opacity', n => all.has(n.id) ? 1 : 0.15);
+    node.select('text').attr('opacity', n => all.has(n.id) ? 1 : 0.15);
+    link.attr('class', ed =>
+      all.has(ed.source.id || ed.source) && all.has(ed.target.id || ed.target)
+        ? 'graph-edge graph-edge-highlight' : 'graph-edge');
+    // Click same node again or click background to reset
+    e.stopPropagation();
+  });
+  svg.on('click', () => {
+    node.select('circle').attr('opacity', 1);
+    node.select('text').attr('opacity', 1);
+    link.attr('class', 'graph-edge');
+  });
+
+  // Force simulation
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(edges).id(d => d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collision', d3.forceCollide(20))
+    .on('tick', () => {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+  simActive = true;
 }
+
+// ── Tasks ──────────────────────────────────────────────────────────
 
 function renderTasks(text) {
   document.getElementById('task-tree').textContent = text;
-  // Count tasks for header
   const m = text.match(/task \d+/g);
   document.getElementById('task-count').innerHTML = `Tasks: <b>${m ? m.length : 0}</b>`;
 }
