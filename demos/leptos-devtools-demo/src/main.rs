@@ -58,9 +58,9 @@ fn init_devtools_bridge() {
             return;
         }
         let snap = auralis_devtools::snapshot();
-        if let Ok(json) = serde_json::to_string_pretty(&snap) {
-            let escaped = json.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
-            let _ = js_sys::eval(&format!("_dtRender('{escaped}')"));
+        if let Ok(json_str) = serde_json::to_string(&snap) {
+            // Pass as JS object literal — avoids string-escaping edge cases.
+            let _ = js_sys::eval(&format!("_dtRender({json_str})"));
         }
     }));
     js_sys::Reflect::set(

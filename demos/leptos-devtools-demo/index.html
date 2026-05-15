@@ -79,10 +79,9 @@ window._toggleDevtools = function() {
   dev.className = dev.className === 'open' ? '' : 'open';
 };
 
-window._dtRender = function(json) {
+window._dtRender = function(snap) {
   seq++;
   document.getElementById('dt-status').innerHTML = 'snap #'+seq;
-  const snap = JSON.parse(json);
   render(snap);
   document.getElementById('dt-sigs').innerHTML = 'Signals: <b>'+snap.signals.length+'</b>';
   document.getElementById('dt-memos').innerHTML = 'Memos: <b>'+snap.memos.length+'</b>';
