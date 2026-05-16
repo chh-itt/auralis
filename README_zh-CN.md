@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 
-两个 crate，零平台依赖，一个核心理念：**反应式 = 可暂停的异步任务；生命周期 = 所有权 + 结构化并发。**
+三个 crate，零平台依赖，一个核心理念：**反应式 = 可暂停的异步任务；生命周期 = 所有权 + 结构化并发。**
 
 ---
 
@@ -17,7 +17,8 @@
 | Crate | 职责 | 依赖 |
 |---|---|---|
 | `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, `memo!` 宏, batch 更新, 变更检测 future | **零** |
-| `auralis-task` | `TaskScope`, 优先级执行器, `timer::sleep`, 取消, 上下文 DI, panic hook | 仅 `auralis-signal` |
+| `auralis-task` | `TaskScope`, 优先级执行器, `timer::sleep`, 取消, 上下文 DI, panic hook | `auralis-signal` |
+| `auralis-devtools` | `ReactiveSnapshot`, `snapshot()`, `diff_snapshots()`, `ChangeStream`, `Timeline`, CLI | `auralis-signal`, `auralis-task` |
 
 ## 快速开始
 
@@ -108,23 +109,40 @@ Auralis 是一个响应式内核，不是框架。它刻意牺牲了三样东西
 
 ## 核心特性
 
-- **`#![forbid(unsafe_code)]`**——两个 crate 均零 unsafe
-- **`#![warn(clippy::all, clippy::pedantic)]`**——严格 lint
-- **Signal crate 零依赖**
-- **单线程设计**（`!Send` / `!Sync`）；多线程场景使用 `Executor::new_instance()` 实例隔离
-- **时间预算可配置**——`set_global_time_budget(ms)` 适配不同帧率
-- **Panic hook**——`set_panic_hook(hook)` 监听任务 panic
-- **Panic 安全的 batch**——`BatchGuard` RAII 在 unwind 时恢复状态
-- **Panic 安全的 Memo**——compute panic 后旧订阅保留，下次 read 即可恢复
-- **主动 waker 注销**——防止僵尸 waker 堆积
-- **Memo 循环检测**——thread-local 深度守卫捕获循环依赖
-- **迭代式 scope 取消**——BFS 叶到根，200+ 层级不爆栈；直接按 TaskId 查找（无全表扫描）
-- **`Signal::update()`**——原地修改，无需克隆
-- **`JoinHandle`**——`spawn()` 返回可取消句柄，支持单任务取消/完成检测
-- **`watch` / `watch_effect`**——自动追踪副作用
-- **Panic 安全清理**——`CallbackHandle::drop` 由 `catch_unwind` 隔离
-- **标签系统**——`Signal`、`Memo` 和 `TaskScope` 支持可选标签，用于诊断输出
-- **调度观察者**——`add_schedule_observer()` 注册被动钩子，在每次 signal 变更时触发
+**安全性**
+
+- `#![forbid(unsafe_code)]` 所有 crate 零 unsafe，`#![warn(clippy::all, clippy::pedantic)]`
+- Panic 安全的 Memo——compute panic 后旧订阅保留，下次 read 即可恢复
+- Panic 安全的 batch——`BatchGuard` RAII 在 unwind 时恢复状态
+- Panic 安全清理——`CallbackHandle::drop` 由 `catch_unwind` 隔离
+- Memo 循环检测——thread-local 深度守卫
+- 迭代式 scope 取消——BFS 叶到根，200+ 层级不爆栈
+
+**性能**
+
+- Signal crate 零依赖
+- 单线程设计（`!Send` / `!Sync`）
+- 时间预算可配置——`set_global_time_budget(ms)`
+- 主动 waker 注销——防止僵尸 waker 堆积
+- `Signal::update()`——原地修改，无需克隆
+
+**诊断**
+
+- `ReactiveSnapshot`——将全部 signal、memo 和依赖边导出为 JSON
+- `diff_snapshots()`——精确看到两帧之间的变化
+- `DerivationNode` 树——React DevTools 风格的数据流图
+- `ChangeStream`——通过观察者钩子获取实时变更事件
+- CLI——`auralis-devtools dump|stream|serve`
+- `Signal`、`Memo`、`TaskScope` 支持可选标签
+- Panic hook——`set_panic_hook()` 监听任务 panic
+- 调度观察者——每次 signal 变更时触发的被动钩子
+
+**易用性**
+
+- `JoinHandle`——`spawn()` 返回可取消句柄
+- `watch` / `watch_effect`——自动追踪副作用
+- `Memo<T>`——惰性计算值，自动追踪依赖
+- `SignalMap<T,U,F>`——轻量只读投影
 
 ## 多线程
 
@@ -193,45 +211,21 @@ drop(scope);
 
 ```
 crates/
-  auralis-signal/       # Signal<T>, Memo<T>, SignalMap<T,U,F>, batch()
-    src/
-      signal.rs         # Signal 状态机、订阅者管理
-      memo.rs           # Memo 惰性追踪、panic 安全重算
-      batch.rs          # BatchGuard、batch()、in_batch()
-      observer.rs       # ObserverState、OBSERVER thread-local
-      future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
-      registry.rs       # 响应式节点注册表（diagnostics feature）
-  auralis-task/         # TaskScope 树、执行器、timer、上下文 DI
-    src/
-      executor.rs       # 优先级执行器、时间预算、延迟回调
-      scope.rs          # TaskScope、CallbackHandle、上下文系统
-      timer.rs          # timer::sleep() 协作延迟
-        debug.rs          # dump_reactive_graph()（feature-gated）
-    examples/
-      counter.rs        # 可运行的 CLI 示例
-    tests/
-      signal_task_integration.rs  # 跨 crate 集成测试
-  auralis-devtools/      # 诊断 DevTools — JSON 快照、变更流、CLI
-    src/
-      snapshot.rs         # ReactiveSnapshot、snapshot()
-      stream.rs           # ChangeReceiver、change_stream()
-    src/bin/
-      main.rs             # CLI: dump / stream / serve
-    tests/
-      snapshot_test.rs    # 集成测试
+  auralis-signal/        # Signal<T>, Memo<T>, SignalMap<T,U,F>, batch(), futures
+  auralis-task/          # TaskScope 树、执行器、timer、上下文 DI
+  auralis-devtools/      # JSON 快照、diff、变更流、CLI
 demos/
-  egui-demo/            # Auralis vs 纯 egui 对比演示
-    examples/
-      perf_report.rs    # 无头性能基准
-  wasm-counter/         # Wasm 反应式计数器 (Signal + Memo + timer)
-  cli-multitask/        # CLI 多任务 Ctrl+C 取消演示
-  leptos-devtools-demo/ # Leptos Todo Dashboard + Auralis DevTools（trunk serve）
+  egui-demo/             # Auralis vs 纯 egui 对比演示
+  wasm-counter/          # Wasm 反应式计数器
+  cli-multitask/         # CLI 多任务 Ctrl+C 取消演示
+  leptos-devtools-demo/  # Leptos Todo Dashboard + Auralis DevTools
 docs/
-  vision-and-design.md  # 设计理念（英文）
-  architecture.md       # 架构与模块（英文）
-  愿景与设计理念.md       # 设计理念（中文）
-  架构与模块设计.md       # 架构与模块（中文）
+  vision-and-design.md   # 设计理念
+  architecture.md        # 架构与模块设计
 ```
+
+Xilem 集成层（`xilem_core_auralis`）见
+[chh-itt/xilem](https://github.com/chh-itt/xilem) `auralis-experiment` 分支。
 
 ## Feature Flags
 
@@ -251,19 +245,22 @@ cargo test --all
 # 指定 crate
 cargo test -p auralis-signal
 cargo test -p auralis-task
+cargo test -p auralis-devtools
 
 # Lint
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features
 
-# 性能基准（非 Wasm 环境）
-cargo bench -p auralis-signal
-cargo bench -p auralis-task
+# 性能基准
+cargo run --example signal_bench --release -p auralis-signal
+cargo run --example scope_bench --release -p auralis-task
 
 # 示例
 cargo run --example counter
-
-# 多线程桥接示例
 cargo run --example multi_thread_bridge -p auralis-task
+cargo run --example multi_instance_isolated -p auralis-task
+
+# DevTools CLI
+cargo run -p auralis-devtools -- dump
 
 # 文档
 cargo doc --open

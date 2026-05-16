@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 
-Two crates, zero platform dependencies, one idea: **reactive = pausable
+Three crates, zero platform dependencies, one idea: **reactive = pausable
 async tasks; lifecycle = ownership + structured concurrency.**
 
 ---
@@ -18,7 +18,8 @@ async tasks; lifecycle = ownership + structured concurrency.**
 | Crate | Role | Dependencies |
 |---|---|---|
 | `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, `memo!` macro, batch updates, change-detection futures | **zero** |
-| `auralis-task` | `TaskScope`, priority executor, `timer::sleep`, cancellation, context DI, panic hook | `auralis-signal` only |
+| `auralis-task` | `TaskScope`, priority executor, `timer::sleep`, cancellation, context DI, panic hook | `auralis-signal` |
+| `auralis-devtools` | `ReactiveSnapshot`, `snapshot()`, `diff_snapshots()`, `ChangeStream`, `Timeline`, CLI | `auralis-signal`, `auralis-task` |
 
 ## Quick Start
 
@@ -115,23 +116,40 @@ step through a flat subscriber list, not a graph.
 
 ## Key Properties
 
-- **`#![forbid(unsafe_code)]`** in both crates — zero unsafe
-- **`#![warn(clippy::all, clippy::pedantic)]`** — strict linting
-- **Zero-dependency** signal crate
-- **Single-threaded by design** (`!Send` / `!Sync`); use `Executor::new_instance()` for multi-threaded isolation
-- **Configurable time budget** — `set_global_time_budget(ms)` for different frame rates
-- **Panic hook** — `set_panic_hook(hook)` to observe task failures
-- **Panic-safe batch** — `BatchGuard` RAII restores state on unwind
-- **Panic-safe Memo** — old subscriptions survive a panicked recompute
-- **Proactive waker deregistration** — no stale-waker accumulation
-- **Memo cycle detection** — thread-local depth guard catches circular dependencies
-- **Iterative scope cancellation** — BFS leaf-to-root, no stack overflow at 200+ levels; direct task-id lookup (no full-table scan)
-- **`Signal::update()`** — in-place mutation without cloning
-- **`JoinHandle`** from `spawn()` — cancel or check individual tasks
-- **`watch` / `watch_effect`** — auto-tracking side effects
-- **Panic-safe cleanup** — `CallbackHandle::drop` is `catch_unwind`-isolated
-- **Labels** — `Signal`, `Memo`, and `TaskScope` support optional labels for diagnostic output
-- **Schedule observers** — `add_schedule_observer()` registers passive hooks that fire on every signal mutation
+**Safety**
+
+- `#![forbid(unsafe_code)]` in all crates, `#![warn(clippy::all, clippy::pedantic)]`
+- Panic-safe `Memo` — old subscriptions survive a panicked recompute
+- Panic-safe `batch` — `BatchGuard` RAII restores state on unwind
+- Panic-safe cleanup — `CallbackHandle::drop` is `catch_unwind`-isolated
+- Memo cycle detection — thread-local depth guard
+- Iterative scope cancellation — BFS leaf-to-root, no stack overflow at 200+ levels
+
+**Performance**
+
+- Zero-dependency signal crate
+- Single-threaded by design (`!Send` / `!Sync`)
+- Configurable time budget — `set_global_time_budget(ms)`
+- Proactive waker deregistration — no stale-waker accumulation
+- `Signal::update()` — in-place mutation without cloning
+
+**Diagnostics**
+
+- `ReactiveSnapshot` — dump every signal, memo, and dependency edge as JSON
+- `diff_snapshots()` — see exactly what changed between two frames
+- `DerivationNode` tree — data-flow graph in React DevTools style
+- `ChangeStream` — real-time change events via observer hooks
+- `CLI` — `auralis-devtools dump|stream|serve`
+- Labels on `Signal`, `Memo`, and `TaskScope` for readable output
+- Panic hook — `set_panic_hook()` to observe task failures
+- Schedule observers — passive hooks on every signal mutation
+
+**Ergonomics**
+
+- `JoinHandle` from `spawn()` — cancel or check individual tasks
+- `watch` / `watch_effect` — auto-tracking side effects
+- `Memo<T>` — lazy computed value with automatic dependency tracking
+- `SignalMap<T,U,F>` — lightweight read-only projection
 
 ## Multi-threading
 
@@ -201,45 +219,21 @@ See `demos/tokio-ssr/` for a runnable demo with concurrent requests.
 
 ```
 crates/
-  auralis-signal/       # Signal<T>, Memo<T>, SignalMap<T,U,F>, batch()
-    src/
-      signal.rs         # Signal state machine, subscriber management
-      memo.rs           # Memo lazy tracking, panic-safe recompute
-      batch.rs          # BatchGuard, batch(), in_batch()
-      observer.rs       # ObserverState, OBSERVER thread-local
-      future.rs         # SignalChangedFuture, MapChangedFuture, FilterChangedFuture
-      registry.rs       # Reactive node registry (diagnostics feature)
-  auralis-task/         # TaskScope tree, executor, timer, context DI
-    src/
-      executor.rs       # Priority executor, time budget, deferred callbacks
-      scope.rs          # TaskScope, CallbackHandle, context system
-      timer.rs          # timer::sleep() cooperative delay
-        debug.rs          # dump_reactive_graph() (feature-gated)
-    examples/
-      counter.rs        # Runnable CLI demo
-    tests/
-      signal_task_integration.rs  # Cross-crate integration tests
-  auralis-devtools/      # Diagnostic DevTools — JSON snapshots, change streams, CLI
-    src/
-      snapshot.rs         # ReactiveSnapshot, snapshot()
-      stream.rs           # ChangeReceiver, change_stream()
-    src/bin/
-      main.rs             # CLI: dump / stream / serve
-    tests/
-      snapshot_test.rs    # Integration tests
+  auralis-signal/        # Signal<T>, Memo<T>, SignalMap<T,U,F>, batch(), futures
+  auralis-task/          # TaskScope tree, executor, timer, context DI
+  auralis-devtools/      # JSON snapshots, diff, change stream, CLI
 demos/
-  egui-demo/            # Auralis vs plain egui comparison
-    examples/
-      perf_report.rs    # Headless performance benchmark
-  wasm-counter/         # Wasm reactive counter (Signal + Memo + timer)
-  cli-multitask/        # CLI multi-task with Ctrl+C cancellation
-  leptos-devtools-demo/ # Leptos Todo Dashboard + Auralis DevTools (trunk serve)
+  egui-demo/             # Auralis vs plain egui comparison
+  wasm-counter/          # Wasm reactive counter
+  cli-multitask/         # CLI multi-task with Ctrl+C cancellation
+  leptos-devtools-demo/  # Leptos Todo Dashboard + Auralis DevTools
 docs/
-  vision-and-design.md  # Design philosophy (EN)
-  architecture.md       # Architecture & modules (EN)
-  愿景与设计理念.md       # Design philosophy (ZH)
-  架构与模块设计.md       # Architecture & modules (ZH)
+  vision-and-design.md   # Design philosophy
+  architecture.md        # Architecture & module design
 ```
+
+See [chh-itt/xilem](https://github.com/chh-itt/xilem) `auralis-experiment` branch
+for the Xilem integration layer (`xilem_core_auralis`).
 
 ## Feature Flags
 
@@ -259,19 +253,22 @@ cargo test --all
 # Specific crate
 cargo test -p auralis-signal
 cargo test -p auralis-task
+cargo test -p auralis-devtools
 
 # Linting
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features
 
-# Benchmarks (host-side, non-Wasm)
+# Benchmarks
 cargo run --example signal_bench --release -p auralis-signal
 cargo run --example scope_bench --release -p auralis-task
 
-# Example
+# Examples
 cargo run --example counter
-
-# Multi-thread bridge example
 cargo run --example multi_thread_bridge -p auralis-task
+cargo run --example multi_instance_isolated -p auralis-task
+
+# DevTools CLI
+cargo run -p auralis-devtools -- dump
 
 # Docs
 cargo doc --open
