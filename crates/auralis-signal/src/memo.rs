@@ -196,6 +196,7 @@ impl<T: Clone + 'static> Memo<T> {
                 Rc::clone(&memo.compute_count),
                 Rc::clone(&memo.label),
                 Rc::clone(&memo.last_compute_us),
+                Rc::clone(&memo.signal.value_formatter),
                 state_addr,
             ));
         }

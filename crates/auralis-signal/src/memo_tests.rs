@@ -723,3 +723,54 @@ fn memo_label_clone_shares_label() {
     clone.set_label("updated");
     assert_eq!(memo.label(), Some("updated".to_string()));
 }
+
+// -- last_compute_us tracking -----------------------------------------
+
+#[test]
+fn memo_last_compute_us_is_nonzero_after_recompute() {
+    let sig = Signal::new(1);
+    let s = sig.clone();
+    let memo = Memo::new(move || s.read() * 2);
+    assert_eq!(memo.read(), 2);
+
+    // Trigger recompute and check that last_compute_us is captured.
+    sig.set(10);
+    assert_eq!(memo.read(), 20);
+
+    #[cfg(feature = "diagnostics")]
+    {
+        let snap = crate::dump_registry();
+        let entry = snap
+            .iter()
+            .find(|n| n.node_type == "Memo")
+            .expect("memo should be in registry");
+        assert!(
+            entry.last_compute_us.is_some(),
+            "last_compute_us should be Some"
+        );
+    }
+}
+
+// -- value_formatter on Memo appears in registry ----------------------
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn memo_value_formatter_appears_in_registry() {
+    let sig = Signal::new(42);
+    let s = sig.clone();
+    let memo = Memo::new(move || s.read() * 2);
+    memo.set_value_formatter(|v| format!("doubled: {v}"));
+
+    let _ = memo.read();
+
+    let snap = crate::dump_registry();
+    let entry = snap
+        .iter()
+        .find(|n| n.node_type == "Memo")
+        .expect("memo should be in registry");
+    assert_eq!(
+        entry.value_debug,
+        Some("doubled: 84".to_string()),
+        "memo value_formatter should appear in dump_registry"
+    );
+}

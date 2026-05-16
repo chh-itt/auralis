@@ -59,7 +59,9 @@ impl CallbackHandle {
     /// Create a no-op handle that does nothing on drop.
     ///
     /// Useful as a placeholder when a [`CallbackHandle`] is required
-    /// but no cleanup is needed.
+    /// but no cleanup is needed — for example, in framework glue code
+    /// that always calls [`register_callback_handle`](TaskScope::register_callback_handle)
+    /// but whose inner binding may be a no-op.
     #[must_use]
     pub fn noop() -> Self {
         Self { cleanup: None }
@@ -183,6 +185,7 @@ type ScopeGetFn = fn() -> Option<TaskScope>;
 /// sufficient for single-threaded Wasm environments.  For multi-task
 /// SSR runtimes (e.g. tokio) the host application should inject a
 /// task-local implementation via [`set_scope_store`].
+#[derive(Debug)]
 pub struct ScopeStore {
     /// Store a scope (or `None` to clear).
     pub set_fn: ScopeSetFn,
@@ -202,8 +205,21 @@ fn ensure_default_store() -> &'static ScopeStore {
 
 /// Install a custom scope store.
 ///
-/// Must be called before any scope operations.  On Wasm or in tests the
-/// default thread-local store is sufficient.
+/// Must be called before any scope operations (i.e. before any
+/// [`TaskScope::new`], [`current_scope`], etc.).  On Wasm or in tests
+/// the default thread-local store is sufficient.
+///
+/// Returns `Ok(())` on success, or `Err(store)` if a store was already
+/// installed (either by a previous call to this function or via
+/// [`init_scope_store_tokio`]).
+///
+/// # Errors
+///
+/// Returns the provided `store` back inside `Err` if the global store
+/// has already been initialised.  This happens when [`set_scope_store`]
+/// or [`init_scope_store_tokio`] was called previously, or when any
+/// scope operation (e.g. [`TaskScope::new`]) has already triggered the
+/// default thread-local store installation.
 ///
 /// # Example (tokio SSR)
 ///
@@ -213,10 +229,10 @@ fn ensure_default_store() -> &'static ScopeStore {
 /// auralis_task::set_scope_store(ScopeStore {
 ///     set_fn: my_tokio_task_local_set,
 ///     get_fn: my_tokio_task_local_get,
-/// });
+/// }).expect("scope store already initialised");
 /// ```
-pub fn set_scope_store(store: ScopeStore) {
-    let _ = SCOPE_STORE.set(store);
+pub fn set_scope_store(store: ScopeStore) -> Result<(), ScopeStore> {
+    SCOPE_STORE.set(store)
 }
 
 // The `set_scope_store` API allows injecting a custom scope store.
@@ -280,9 +296,15 @@ pub(crate) fn get_scope_direct() -> Option<TaskScope> {
 ///
 /// Uses `tokio::task::LocalKey` to store the current [`TaskScope`] per
 /// tokio task, enabling true multi-request isolation.  Call this once
-/// at process startup, before any scope operations.
+/// at process startup, **before** any scope operations.
 ///
 /// Only available with the **`ssr-tokio`** feature (non-wasm).
+///
+/// # Panics
+///
+/// Panics if any scope operation has already occurred (a default
+/// thread-local store would have been installed by then).  Call this
+/// at the very beginning of `main()` or the runtime bootstrap.
 ///
 /// # Example
 ///
@@ -312,7 +334,8 @@ pub fn init_scope_store_tokio() {
                 .ok()
                 .flatten()
         },
-    });
+    })
+    .expect("init_scope_store_tokio must be called BEFORE any scope operations");
 }
 
 // ---- public API --------------------------------------------------------
@@ -510,6 +533,16 @@ impl TaskScope {
     }
 
     /// Create a child scope that inherits the parent's executor.
+    ///
+    /// The child is stored in the parent's children list.  This means
+    /// dropping all external clones of the child does **not** immediately
+    /// cancel it — the parent's strong reference keeps it alive.  The
+    /// child is fully cancelled only when the parent itself is dropped
+    /// (or when [`TaskScope::drop`] runs on the last reference).
+    ///
+    /// To explicitly cancel a child while the parent is still alive,
+    /// call [`suspend`](Self::suspend) on the child, or use a
+    /// [`JoinHandle`] to cancel individual tasks.
     pub fn new_child(parent: &Self) -> Self {
         let ex = parent.inner.borrow().executor.clone();
         let cancelled = Rc::new(Cell::new(false));

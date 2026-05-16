@@ -72,7 +72,7 @@ impl Drop for BatchGuard {
                     }));
                 }
             } else {
-                c.set(depth - 1);
+                c.set(depth.saturating_sub(1));
             }
         });
     }
@@ -115,7 +115,7 @@ impl Drop for BatchGuard {
 /// assert_eq!(b.read(), 2);
 /// ```
 pub fn batch<F: FnOnce() -> R, R>(f: F) -> R {
-    BATCH_DEPTH.with(|c| c.set(c.get() + 1));
+    BATCH_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
     let _guard = BatchGuard;
     f()
 }

@@ -129,6 +129,7 @@ pub(crate) fn make_signal_callback<T: 'static>(
 
 /// Build a callback for a [`Memo`](crate::Memo) that produces a snapshot
 /// when the memo is still live.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_memo_callback<T: 'static>(
     weak_subs: Weak<RefCell<Vec<(crate::memo::SignalKey, crate::memo::CleanupFn)>>>,
     weak_signal: Weak<RefCell<SignalState<T>>>,
@@ -136,6 +137,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
     compute_count: Rc<std::cell::Cell<u64>>,
     label: Rc<RefCell<Option<String>>>,
     last_compute_us: Rc<std::cell::Cell<u64>>,
+    formatter: crate::signal::ValueFormatter<T>,
     state_addr: usize,
 ) -> RegistryCallback {
     Box::new(move || {
@@ -145,6 +147,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
         let sub_list = subs.borrow();
         let dep_count = sub_list.len();
         let dep_addrs: Vec<usize> = sub_list.iter().map(|(key, _)| key.addr()).collect();
+        let value_debug = formatter.borrow().as_ref().map(|f| f(&s.value));
         Some(ReactiveNodeSnapshot {
             label: label.borrow().clone(),
             node_type: "Memo",
@@ -158,7 +161,7 @@ pub(crate) fn make_memo_callback<T: 'static>(
             last_compute_us: Some(last_compute_us.get()),
             update_count: None,
             type_name: Some(std::any::type_name::<T>().to_string()),
-            value_debug: None,
+            value_debug,
         })
     })
 }

@@ -131,7 +131,7 @@ pub struct Signal<T> {
     label: Rc<RefCell<Option<String>>>,
     /// Optional closure for formatting the current value as a
     /// debug string.  Set via [`set_value_formatter`](Signal::set_value_formatter).
-    value_formatter: ValueFormatter<T>,
+    pub(crate) value_formatter: ValueFormatter<T>,
 }
 
 // Without the diagnostics feature, Signal::new has no 'static bound.
@@ -191,7 +191,7 @@ impl<T: 'static> Signal<T> {
         Self {
             state,
             label,
-            value_formatter: Rc::new(RefCell::new(None)),
+            value_formatter,
         }
     }
 }

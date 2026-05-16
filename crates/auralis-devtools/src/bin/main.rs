@@ -33,22 +33,17 @@ fn cmd_dump() {
 
 fn cmd_stream() {
     let rx = auralis_devtools::stream::change_stream();
-    let mut last = rx.current_seq();
+    let mut last = 0u64;
     loop {
         // Block until a signal changes, or heartbeat every 500 ms.
         let _ = rx.wait_timeout(Duration::from_millis(500));
-        let current = rx.current_seq();
-        if current != last {
-            let event = auralis_devtools::stream::ChangeEvent {
-                seq: current,
-                addr: 0,
-                version: 0,
-                ms_since_start: 0,
-            };
-            let line = serde_json::to_string(&event).expect("serialization should not fail");
-            println!("{line}");
-            let _ = io::stdout().flush();
-            last = current;
+        if let Some(event) = rx.latest_event() {
+            if event.seq != last {
+                let line = serde_json::to_string(&event).expect("serialization should not fail");
+                println!("{line}");
+                let _ = io::stdout().flush();
+                last = event.seq;
+            }
         }
     }
 }
@@ -82,22 +77,17 @@ fn cmd_serve() {
 
         // Stream changes.
         let rx = auralis_devtools::stream::change_stream();
-        let mut last = rx.current_seq();
+        let mut last = 0u64;
         loop {
             let _ = rx.wait_timeout(Duration::from_millis(200));
-            let current = rx.current_seq();
-            if current != last {
-                let event = auralis_devtools::stream::ChangeEvent {
-                    seq: current,
-                    addr: 0,
-                    version: 0,
-                    ms_since_start: 0,
-                };
-                let line = serde_json::to_string(&event).expect("serialization");
-                if ws.send(tungstenite::Message::Text(line.into())).is_err() {
-                    break; // client disconnected
+            if let Some(event) = rx.latest_event() {
+                if event.seq != last {
+                    let line = serde_json::to_string(&event).expect("serialization");
+                    if ws.send(tungstenite::Message::Text(line.into())).is_err() {
+                        break; // client disconnected
+                    }
+                    last = event.seq;
                 }
-                last = current;
             }
         }
         eprintln!("client disconnected");
