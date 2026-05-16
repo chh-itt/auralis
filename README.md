@@ -93,7 +93,7 @@ No manual cancel tokens, no "effect system." Just async Rust.
 
 ## Design bet
 
-Auralis is **10× smaller, not 10× more powerful.** It sacrifices three things
+Auralis is a reactive kernel, not a framework. It sacrifices three things
 that full reactive frameworks need:
 
 - **No reactive graph.** Each signal has a flat subscriber list and a
@@ -107,11 +107,11 @@ that full reactive frameworks need:
   (`!Send + !Sync`). For multi-threaded SSR, spin up isolated executors
   per request.
 
-What you get: ~1,400 lines of implementation across two crates, zero
-dependencies for the signal layer, `#![forbid(unsafe_code)]`. The entire
-reactive layer fits in your head after one coffee. If you need to debug
-why an effect didn't fire, you step through a flat subscriber list, not
-a graph.
+What you get: three crates (~2,400 lines signal, ~3,100 lines task
+runtime, ~1,000 lines DevTools), zero dependencies for the signal
+crate, `#![forbid(unsafe_code)]`. The signal layer fits in your head
+after one coffee. If you need to debug why an effect didn't fire, you
+step through a flat subscriber list, not a graph.
 
 ## Key Properties
 
