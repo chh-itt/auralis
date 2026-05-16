@@ -108,9 +108,9 @@ that full reactive frameworks need:
   (`!Send + !Sync`). For multi-threaded SSR, spin up isolated executors
   per request.
 
-What you get: three crates (~2,400 lines signal, ~3,100 lines task
-runtime, ~1,000 lines DevTools), zero dependencies for the signal
-crate, `#![forbid(unsafe_code)]`. The signal layer fits in your head
+What you get: three crates (1,296 lines signal, 1,819 lines task
+runtime, 663 lines DevTools — pure Rust, excluding comments/tests),
+zero dependencies for the signal crate, `#![forbid(unsafe_code)]`. The signal layer fits in your head
 after one coffee. If you need to debug why an effect didn't fire, you
 step through a flat subscriber list, not a graph.
 
