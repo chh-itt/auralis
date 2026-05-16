@@ -29,4 +29,4 @@ mod snapshot;
 pub mod stream;
 pub mod timeline;
 
-pub use snapshot::{snapshot, ReactiveSnapshot};
+pub use snapshot::{snapshot, DerivationNode, ReactiveSnapshot};
