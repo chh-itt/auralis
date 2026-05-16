@@ -1032,6 +1032,47 @@ pub fn init_flush_scheduler(sched: Rc<dyn ScheduleFlush>) {
     install_signal_hook_once();
 }
 
+/// Check whether a flush scheduler has already been installed on the
+/// global executor.
+///
+/// Used by [`auralis_devtools::init`] to decide whether to auto-install
+/// a [`DeferredScheduler`](crate::scheduler::DeferredScheduler).
+#[must_use]
+pub fn has_flush_scheduler() -> bool {
+    EXECUTOR.with(|exec| exec.borrow().flush_scheduler.is_some())
+}
+
+/// Drain pending deferred signal callbacks on the global executor.
+///
+/// Unlike [`Executor::flush_instance`], this does **not** poll tasks or
+/// expire timers — it only processes callbacks that [`Signal::set`]
+/// pushed before a scheduler was installed.  Snapshot and diagnostic
+/// tools call this to ensure memo dirty state is consistent before
+/// reading the registry.
+///
+/// Safe to call when no scheduler is installed (no-op).  Callbacks are
+/// [`catch_unwind`]-isolated so a panic in one subscriber doesn't block
+/// the rest.  Uses [`RefCell::try_borrow_mut`] so that calling this from
+/// within an in-progress flush (re-entrant snapshot) is a safe no-op
+/// instead of a panic.
+///
+/// [`RefCell::try_borrow_mut`]: std::cell::RefCell::try_borrow_mut
+pub fn drain_deferred_signal_callbacks() {
+    loop {
+        let callbacks = EXECUTOR.with(|ex| {
+            ex.try_borrow_mut()
+                .map(|mut e| std::mem::take(&mut e.deferred_callbacks))
+                .unwrap_or_default()
+        });
+        if callbacks.is_empty() {
+            break;
+        }
+        for cb in callbacks {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
+        }
+    }
+}
+
 /// Install the hook that bridges `auralis_signal::Signal::set` to the
 /// executor's deferred-callback queue.
 ///

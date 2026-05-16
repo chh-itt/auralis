@@ -13,51 +13,17 @@
 //! cargo run -p pipeline-demo -- devtools # Print snapshot every 3 seconds
 //! ```
 
-use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 use std::time::Duration;
 
 use auralis_signal::{batch, Memo, Signal};
-use auralis_task::init_flush_scheduler;
+use auralis_task::scheduler::DeferredScheduler;
 use auralis_task::timer;
 use auralis_task::TaskScope;
 
 #[cfg(feature = "web")]
 mod web_server;
-
-// ---------------------------------------------------------------------------
-// Scheduler: defers flush callbacks — drained by the main loop.
-// This avoids re-entrant flush_instance calls that occur with a
-// synchronous scheduler + timers.
-// ---------------------------------------------------------------------------
-
-type FlushCallback = Box<dyn FnOnce()>;
-
-struct DemoScheduler {
-    pending: RefCell<Vec<FlushCallback>>,
-}
-
-impl DemoScheduler {
-    fn new() -> Rc<Self> {
-        Rc::new(Self {
-            pending: RefCell::new(Vec::new()),
-        })
-    }
-
-    fn drain(&self) {
-        let cbs: Vec<FlushCallback> = self.pending.borrow_mut().drain(..).collect();
-        for cb in cbs {
-            cb();
-        }
-    }
-}
-
-impl auralis_task::ScheduleFlush for DemoScheduler {
-    fn schedule(&self, callback: FlushCallback) {
-        self.pending.borrow_mut().push(callback);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Pipeline
@@ -268,8 +234,12 @@ impl Pipeline {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let scheduler = DemoScheduler::new();
-    init_flush_scheduler(scheduler.clone());
+    // One line to set up the scheduler (was ~15 lines of boilerplate).
+    let scheduler = DeferredScheduler::new();
+    auralis_task::init_flush_scheduler(scheduler.clone());
+    // Safety net: if init_flush_scheduler wasn't called, snapshot() would
+    // auto-install its own scheduler.  With it, this is a no-op.
+    auralis_devtools::init();
 
     let pipeline = Rc::new(Pipeline::new());
     let root = TaskScope::new();
@@ -383,7 +353,7 @@ fn main() {
     println!("\nPipeline shut down.");
 }
 
-fn run_loop(seconds: u64, scheduler: &DemoScheduler) {
+fn run_loop(seconds: u64, scheduler: &DeferredScheduler) {
     let end = std::time::Instant::now() + Duration::from_secs(seconds);
     while std::time::Instant::now() < end {
         std::thread::sleep(Duration::from_millis(50));

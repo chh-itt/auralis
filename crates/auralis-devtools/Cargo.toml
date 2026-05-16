@@ -10,6 +10,7 @@ repository.workspace = true
 [features]
 default = []
 ws-transport = ["dep:tungstenite"]
+wasm-bridge = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
 auralis-signal = { workspace = true, features = ["diagnostics"] }
@@ -17,3 +18,5 @@ auralis-task = { workspace = true, features = ["debug"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = { version = "0.28", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }

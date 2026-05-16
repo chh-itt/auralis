@@ -3,6 +3,145 @@
 use auralis_signal::{Memo, Signal};
 use auralis_task::TaskScope;
 
+// ---------------------------------------------------------------------------
+// init() + auto-drain tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_installs_scheduler() {
+    // Each test runs on a fresh thread, so has_flush_scheduler starts false.
+    auralis_task::reset_executor_for_test();
+    assert!(
+        !auralis_task::has_flush_scheduler(),
+        "no scheduler should be installed on a fresh executor"
+    );
+
+    auralis_devtools::init();
+    assert!(auralis_task::has_flush_scheduler());
+}
+
+#[test]
+fn init_is_idempotent() {
+    auralis_task::reset_executor_for_test();
+    auralis_devtools::init();
+    auralis_devtools::init(); // second call should be a no-op
+    assert!(auralis_task::has_flush_scheduler());
+}
+
+#[test]
+fn snapshot_auto_inits() {
+    auralis_task::reset_executor_for_test();
+    // No explicit init() — snapshot() should auto-init.
+    let sig = Signal::new(42);
+    sig.set_label("auto_init_test");
+    let snap = auralis_devtools::snapshot();
+    assert!(
+        snap.signals
+            .iter()
+            .any(|s| s.label.as_deref() == Some("auto_init_test")),
+        "snapshot should work without explicit init()"
+    );
+}
+
+#[test]
+fn init_is_noop_when_user_scheduler_exists() {
+    auralis_task::reset_executor_for_test();
+
+    // User installs their own scheduler first.
+    let user_sched = auralis_task::scheduler::DeferredScheduler::new();
+    auralis_task::init_flush_scheduler(user_sched.clone());
+
+    // devtools::init() should be a no-op.
+    auralis_devtools::init();
+    assert!(auralis_task::has_flush_scheduler());
+
+    // Verify snapshot still works.
+    let sig = Signal::new(42);
+    sig.set_label("user_sched_test");
+    let snap = auralis_devtools::snapshot();
+    assert!(snap
+        .signals
+        .iter()
+        .any(|s| s.label.as_deref() == Some("user_sched_test")));
+
+    // Drain the user scheduler to process pending notifications.
+    user_sched.drain();
+}
+
+#[test]
+fn snapshot_works_after_user_scheduler_init() {
+    auralis_task::reset_executor_for_test();
+
+    let user_sched = auralis_task::scheduler::DeferredScheduler::new();
+    auralis_task::init_flush_scheduler(user_sched.clone());
+    // Don't call auralis_devtools::init() — snapshot should still work.
+
+    let sig = Signal::new(99);
+    sig.set_label("user_only");
+    let snap = auralis_devtools::snapshot();
+    assert!(snap
+        .signals
+        .iter()
+        .any(|s| s.label.as_deref() == Some("user_only")));
+
+    user_sched.drain();
+}
+
+#[test]
+fn snapshot_auto_init_works_with_memos() {
+    auralis_task::reset_executor_for_test();
+
+    let a = Signal::new(1);
+    let b = Signal::new(2);
+    a.set_label("a");
+    b.set_label("b");
+    let a2 = a.clone();
+    let b2 = b.clone();
+    let sum = Memo::new(move || a2.read() + b2.read());
+    sum.set_label("sum");
+
+    // No init() — snapshot auto-inits, drains, and memo should be computed.
+    let snap = auralis_devtools::snapshot();
+    let memo_entry = snap
+        .memos
+        .iter()
+        .find(|m| m.label.as_deref() == Some("sum"))
+        .expect("sum memo must be in snapshot");
+    assert_eq!(memo_entry.dependency_count, 2);
+
+    // Update a source and snapshot again.
+    a.set(10);
+    let _ = sum.read(); // trigger recompute so version bumps
+    let snap2 = auralis_devtools::snapshot();
+    let memo_entry2 = snap2
+        .memos
+        .iter()
+        .find(|m| m.label.as_deref() == Some("sum"))
+        .unwrap();
+    assert_eq!(
+        memo_entry2.version, 2,
+        "memo should have recomputed after a.set(10)"
+    );
+}
+
+#[test]
+fn init_respects_existing_scheduler() {
+    auralis_task::reset_executor_for_test();
+
+    // Simulate: user installs their own scheduler early.
+    let user_sched = auralis_task::scheduler::DeferredScheduler::new();
+    auralis_task::init_flush_scheduler(user_sched.clone());
+    assert!(auralis_task::has_flush_scheduler());
+
+    // devtools::init() is called later (e.g., inside a library).
+    auralis_devtools::init();
+
+    // The user's scheduler should still be the one installed.
+    // (has_flush_scheduler returns true, init was a no-op.)
+    assert!(auralis_task::has_flush_scheduler());
+    user_sched.drain();
+}
+
 #[test]
 fn snapshot_includes_signals() {
     let sig = Signal::new(42);
@@ -235,4 +374,62 @@ fn derivation_tree_json_serializes() {
     let _sig = Signal::new(0);
     let json = serde_json::to_string_pretty(&auralis_devtools::snapshot()).unwrap();
     assert!(json.contains("\"derivation_tree\""));
+}
+
+// ---------------------------------------------------------------------------
+// Tests for accumulated callbacks processed by snapshot()
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_drains_callbacks_accumulated_before_init() {
+    auralis_task::reset_executor_for_test();
+
+    // Simulate: signals are set BEFORE any scheduler is installed.
+    let sig = Signal::new(0);
+    sig.set_label("source");
+    let s = sig.clone();
+    let memo = Memo::new(move || s.read() * 2);
+    memo.set_label("double");
+    let _ = memo.read(); // initial compute
+
+    sig.set(10); // callback accumulates in executor.deferred_callbacks
+
+    // Now snapshot — should auto-init and drain the accumulated callback.
+    let snap = auralis_devtools::snapshot();
+    let memo_entry = snap
+        .memos
+        .iter()
+        .find(|m| m.label.as_deref() == Some("double"))
+        .expect("memo must be in snapshot");
+
+    // After draining, the memo should be marked dirty because its
+    // source changed (notification fired and set the dirty flag).
+    assert!(
+        memo_entry.is_dirty,
+        "memo should be dirty after source changed"
+    );
+}
+
+#[test]
+fn snapshot_consistent_without_explicit_init() {
+    auralis_task::reset_executor_for_test();
+
+    // Multiple set() calls before any snapshot or init.
+    let sig = Signal::new(1);
+    sig.set_label("multi_set");
+    sig.set(2);
+    sig.set(3);
+    sig.set(4);
+
+    let snap = auralis_devtools::snapshot();
+    let entry = snap
+        .signals
+        .iter()
+        .find(|s| s.label.as_deref() == Some("multi_set"))
+        .expect("signal must be in snapshot");
+    assert_eq!(entry.version, 3, "version should reflect all sets");
+    assert_eq!(
+        entry.update_count, 3,
+        "update_count should reflect all sets"
+    );
 }

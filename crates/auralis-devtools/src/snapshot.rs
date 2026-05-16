@@ -208,14 +208,17 @@ fn build_derivation_tree(signals: &[SignalEntry], memos: &[MemoEntry]) -> Vec<De
 /// Calls `dump_registry()` (from `auralis_signal`'s `diagnostics`
 /// feature) and formats the result as [`ReactiveSnapshot`].
 ///
-/// # Panics
+/// # Auto-initialisation
 ///
-/// Panics if the signal schedule hook has not been installed (i.e.
-/// `auralis_task::init_flush_scheduler` was never called).  Without
-/// the hook, signal callbacks execute synchronously and can cause
-/// re-entrant borrow panics during the snapshot.
+/// On first call this automatically invokes [`crate::init`], which
+/// installs a built-in flush scheduler if the user hasn't already.
+/// Pending signal notifications are drained before the snapshot is
+/// taken, so memo and subscriber state is consistent.
 #[must_use]
 pub fn snapshot() -> ReactiveSnapshot {
+    crate::init();
+    crate::drain_auto_scheduler();
+
     let nodes: Vec<ReactiveNodeSnapshot> = dump_registry();
 
     // Build reverse dependency map: signal_addr → [memo_addr]
