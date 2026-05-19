@@ -3,7 +3,6 @@ members = [
     "crates/auralis-signal",
     "crates/auralis-task",
     "crates/auralis-devtools",
-    "crates/auralis-ui",
 ]
 resolver = "2"
 
