@@ -249,6 +249,17 @@ impl<T: Clone + 'static> Memo<T> {
         self.dirty.get()
     }
 
+    /// Return a reference to the internal [`Signal`].
+    ///
+    /// The signal's version is bumped when the memo's sources change,
+    /// so subscribers (such as UI elements) can use
+    /// [`Signal::subscribe`] to trigger repaints when the memo
+    /// recomputes.
+    #[must_use]
+    pub fn inner_signal(&self) -> &Signal<T> {
+        &self.signal
+    }
+
     /// Return the opaque address of this memo's internal signal.
     /// Useful for associating the memo with a component in `DevTools`.
     #[must_use]

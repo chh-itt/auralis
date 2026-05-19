@@ -73,7 +73,7 @@ use std::rc::Rc;
 use crate::batch::{batch_depth, push_batched_notification};
 use crate::observer::OBSERVER;
 
-pub(crate) type SubscriberId = u64;
+pub type SubscriberId = u64;
 
 pub(crate) struct Subscriber {
     pub(crate) id: SubscriberId,
@@ -848,7 +848,6 @@ pub(crate) fn borrow_state<T>(sig: &Signal<T>) -> std::cell::Ref<'_, SignalState
 ///   a no-op.
 /// - The returned id is valid until `unsubscribe` is called; it is
 ///   not recycled.
-#[doc(hidden)]
 pub fn subscribe<T>(sig: &Signal<T>, callback: Rc<dyn Fn()>) -> SubscriberId {
     let mut state = sig.state.borrow_mut();
     let id = state.next_subscriber_id;
@@ -866,7 +865,6 @@ pub fn subscribe<T>(sig: &Signal<T>, callback: Rc<dyn Fn()>) -> SubscriberId {
 /// The subscriber is marked dead immediately and removed from the list.
 /// Any in-flight deferred notification will skip it (the `alive` flag
 /// is checked before each callback invocation).
-#[doc(hidden)]
 pub fn unsubscribe<T>(sig: &Signal<T>, id: SubscriberId) {
     let mut state = sig.state.borrow_mut();
     if let Some(sub) = state.subscribers.iter().find(|s| s.id == id) {
