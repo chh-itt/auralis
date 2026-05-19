@@ -73,6 +73,9 @@ use std::rc::Rc;
 use crate::batch::{batch_depth, push_batched_notification};
 use crate::observer::OBSERVER;
 
+/// Opaque identifier for a registered subscriber callback.
+///
+/// Returned by [`subscribe`] and used by [`unsubscribe`].
 pub type SubscriberId = u64;
 
 pub(crate) struct Subscriber {

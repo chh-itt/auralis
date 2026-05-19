@@ -97,6 +97,7 @@ pub fn subscribe_to<T: 'static>(
 
 /// Like [`subscribe_to`] but accepts a `Box<dyn Fn()>` (for use with
 /// trait objects).
+#[must_use]
 pub fn subscribe_to_dyn<T: 'static>(
     signal: &Signal<T>,
     callback: Box<dyn Fn()>,
