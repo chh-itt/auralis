@@ -1129,6 +1129,26 @@ pub fn init_time_source(ts: Rc<dyn TimeSource>) {
     EXECUTOR.with(|exec| exec.borrow_mut().time_source = Some(ts));
 }
 
+/// Milliseconds until the earliest pending timer on the **global**
+/// executor, measured on the installed [`TimeSource`]'s axis.
+///
+/// - `Some(0)` — a timer has already expired; call [`flush_all`] to fire it.
+/// - `Some(n)` — the earliest timer fires in `n` ms; an event-loop host
+///   should schedule a wake-up (e.g. winit `ControlFlow::WaitUntil`) so the
+///   flush actually happens at that time.
+/// - `None` — no pending timers, or no [`TimeSource`] installed (without a
+///   [`TimeSource`] every timer expires on the next flush anyway).
+#[must_use]
+pub fn next_timer_delay_ms() -> Option<u64> {
+    EXECUTOR.with(|exec| {
+        let e = exec.borrow();
+        e.time_source.as_ref()?;
+        let earliest = e.timers.keys().next().copied()?;
+        let now = e.now_ms();
+        Some(earliest.saturating_sub(now))
+    })
+}
+
 /// Set the per-flush time budget on the **global** thread-local executor.
 ///
 /// This does **not** affect instance executors created via
@@ -1545,8 +1565,10 @@ pub(crate) fn spawn_no_auto_flush(
     })
 }
 
-/// Run a manual flush cycle (for tests that need to control timing).
-#[cfg(test)]
-pub(crate) fn flush_all() {
+/// Run a manual flush cycle on the global executor. Processes expired
+/// timers, deferred signal callbacks, and polls ready tasks.
+///
+/// Call this after advancing a [`TimeSource`] to fire pending timers.
+pub fn flush_all() {
     flush();
 }

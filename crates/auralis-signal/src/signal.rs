@@ -78,6 +78,28 @@ use crate::observer::OBSERVER;
 /// Returned by [`subscribe`] and used by [`unsubscribe`].
 pub type SubscriberId = u64;
 
+// Thread-local slot set by `notify_and_check_follow_up` before each
+// subscriber callback fires.  Contains the `state_addr` of the signal
+// whose subscribers are currently being notified.  0 = no notification
+// in progress.  Read by DevTools causal link recording.
+#[doc(hidden)]
+thread_local! {
+    #[allow(missing_docs)]
+    pub static CURRENT_NOTIFYING_SIGNAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A recorded entry in a signal's value change history ring buffer.
+#[cfg(feature = "diagnostics")]
+#[derive(Clone, Copy, Debug)]
+pub struct ValueHistoryEntry {
+    /// Monotonic version number at the time of the change.
+    pub version: u64,
+    /// Total number of mutations (set/update/bump) at the time of the change.
+    pub update_count: u64,
+    /// Microsecond timestamp (from `auralis_signal::now_us`) when the change occurred.
+    pub timestamp_us: u64,
+}
+
 pub(crate) struct Subscriber {
     pub(crate) id: SubscriberId,
     /// Set to `false` when this subscriber is unsubscribed.  The
@@ -101,6 +123,8 @@ pub(crate) struct SignalState<T> {
     notifying: bool,
     /// Number of times this signal has been mutated (set/update/bump).
     pub(crate) update_count: u64,
+    #[cfg(feature = "diagnostics")]
+    pub(crate) value_history: Option<std::collections::VecDeque<ValueHistoryEntry>>,
 }
 
 /// Type alias for the optional value formatter closure.
@@ -153,6 +177,8 @@ impl<T> Signal<T> {
             dirty: false,
             notifying: false,
             update_count: 0,
+            #[cfg(feature = "diagnostics")]
+            value_history: None,
         }));
         Self {
             state,
@@ -178,6 +204,7 @@ impl<T: 'static> Signal<T> {
             dirty: false,
             notifying: false,
             update_count: 0,
+            value_history: None,
         }));
         let label = Rc::new(RefCell::new(None));
         let value_formatter = Rc::new(RefCell::new(None));
@@ -213,6 +240,8 @@ impl<T> Signal<T> {
                 dirty: false,
                 notifying: false,
                 update_count: 0,
+                #[cfg(feature = "diagnostics")]
+                value_history: None,
             })),
             label: Rc::new(RefCell::new(None)),
             value_formatter: Rc::new(RefCell::new(None)),
@@ -307,6 +336,8 @@ impl<T> Signal<T> {
         notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
+        #[cfg(feature = "diagnostics")]
+        self.record_value_history_entry();
         if let Some(subs) = subs {
             Self::schedule_notification(&self.state, subs);
         }
@@ -333,6 +364,8 @@ impl<T> Signal<T> {
         CHANGED_FLAG.with(|c| c.set(true));
         let subs = Self::prepare_notification(&mut state);
         drop(state);
+        #[cfg(feature = "diagnostics")]
+        self.record_value_history_entry();
         if let Some(subs) = subs {
             Self::schedule_notification(&self.state, subs);
         }
@@ -385,11 +418,14 @@ impl<T> Signal<T> {
         state_ref: &Rc<RefCell<SignalState<T>>>,
         subs: &[(Rc<Cell<bool>>, Rc<dyn Fn()>)],
     ) -> bool {
+        let addr = Rc::as_ptr(state_ref) as usize;
         for (alive, cb) in subs {
             if alive.get() {
+                CURRENT_NOTIFYING_SIGNAL.with(|c| c.set(addr));
                 cb();
             }
         }
+        CURRENT_NOTIFYING_SIGNAL.with(|c| c.set(0));
 
         let mut state = state_ref.borrow_mut();
         state.notifying = false;
@@ -500,6 +536,8 @@ impl<T> Signal<T> {
         notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
+        #[cfg(feature = "diagnostics")]
+        self.record_value_history_entry();
         if let Some(subs) = subs {
             Self::schedule_notification(&self.state, subs);
         }
@@ -632,6 +670,77 @@ impl<T> Signal<T> {
         self.state.borrow().subscribers.len()
     }
 
+    /// Return the total number of times this signal has been mutated (set/update/bump).
+    #[must_use]
+    pub fn update_count(&self) -> u64 {
+        self.state.borrow().update_count
+    }
+
+    /// Enable value history recording for this signal.
+    #[cfg(feature = "diagnostics")]
+    pub fn enable_value_history(&self) {
+        if self.state.borrow().value_history.is_none() {
+            self.state.borrow_mut().value_history =
+                Some(std::collections::VecDeque::with_capacity(20));
+        }
+    }
+
+    /// Return recent value change history, oldest first.
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn value_history(&self) -> Vec<ValueHistoryEntry> {
+        self.state
+            .borrow()
+            .value_history
+            .as_ref()
+            .map(|h| h.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn record_value_history_entry(&self) {
+        if let Some(ref mut h) = self.state.borrow_mut().value_history {
+            if h.len() >= 20 {
+                h.pop_front();
+            }
+            h.push_back(ValueHistoryEntry {
+                version: self.version(),
+                update_count: self.update_count(),
+                timestamp_us: crate::now_us(),
+            });
+        }
+    }
+
+    /// Create a [`WeakSignal`] pointing at this signal's allocation.
+    ///
+    /// The weak handle does **not** keep the signal alive.  Upgrade it
+    /// with [`WeakSignal::upgrade`] to get a full [`Signal`] back while
+    /// at least one strong clone still exists.
+    ///
+    /// This is the primitive for storing signals inside long-lived
+    /// callbacks (subscriptions, async tasks) without creating an
+    /// ownership cycle that would keep the signal alive forever.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use auralis_signal::Signal;
+    ///
+    /// let sig = Signal::new(1);
+    /// let weak = sig.downgrade();
+    /// assert!(weak.upgrade().is_some());
+    /// drop(sig);
+    /// assert!(weak.upgrade().is_none());
+    /// ```
+    #[must_use]
+    pub fn downgrade(&self) -> WeakSignal<T> {
+        WeakSignal {
+            state: Rc::downgrade(&self.state),
+            label: Rc::downgrade(&self.label),
+            value_formatter: Rc::downgrade(&self.value_formatter),
+        }
+    }
+
     /// Set a human-readable label for this signal.
     ///
     /// Labels appear in `dump_reactive_graph()` output and are useful
@@ -711,6 +820,8 @@ impl<T> Signal<T> {
         notify_schedule_observers(addr, ver);
         let subs = Self::prepare_notification(&mut state);
         drop(state);
+        #[cfg(feature = "diagnostics")]
+        self.record_value_history_entry();
         if let Some(subs) = subs {
             Self::schedule_notification(&self.state, subs);
         }
@@ -758,6 +869,77 @@ impl<T: Default> Default for Signal<T> {
 impl<T: Default + 'static> Default for Signal<T> {
     fn default() -> Self {
         Self::new(T::default())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WeakSignal — non-owning signal handle
+// ---------------------------------------------------------------------------
+
+/// A non-owning handle to a [`Signal`]'s allocation.
+///
+/// Created by [`Signal::downgrade`].  Holding a `WeakSignal` does not
+/// keep the signal alive: once the last strong [`Signal`] clone is
+/// dropped, [`upgrade`](WeakSignal::upgrade) returns `None`.
+///
+/// # Why this exists
+///
+/// Long-lived callbacks (subscriptions, async tasks, timers) that
+/// capture a `Signal` strongly extend the signal's lifetime for as long
+/// as the callback is registered — which for a subscription stored on
+/// another signal means *forever*.  Capturing a `WeakSignal` instead
+/// breaks the cycle: the callback upgrades on each invocation and
+/// treats a failed upgrade as "the consumer is gone".
+///
+/// See [`subscription::subscribe_derived`](crate::subscription::subscribe_derived)
+/// for the canonical use.
+pub struct WeakSignal<T> {
+    pub(crate) state: std::rc::Weak<RefCell<SignalState<T>>>,
+    pub(crate) label: std::rc::Weak<RefCell<Option<String>>>,
+    pub(crate) value_formatter: std::rc::Weak<RefCell<Option<Box<dyn Fn(&T) -> String>>>>,
+}
+
+impl<T> WeakSignal<T> {
+    /// Attempt to upgrade to a full [`Signal`].
+    ///
+    /// Returns `None` if every strong clone of the original signal has
+    /// been dropped.  All three shared allocations (state, label,
+    /// formatter) must still be alive; any live strong `Signal` clone
+    /// guarantees that, so the upgrade is all-or-nothing.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<Signal<T>> {
+        Some(Signal {
+            state: self.state.upgrade()?,
+            label: self.label.upgrade()?,
+            value_formatter: self.value_formatter.upgrade()?,
+        })
+    }
+
+    /// Return `true` if the underlying signal is still alive.
+    ///
+    /// Equivalent to `self.upgrade().is_some()` without constructing
+    /// the strong handle.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.state.strong_count() > 0
+    }
+}
+
+impl<T> Clone for WeakSignal<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            label: self.label.clone(),
+            value_formatter: self.value_formatter.clone(),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for WeakSignal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakSignal")
+            .field("alive", &self.is_alive())
+            .finish()
     }
 }
 

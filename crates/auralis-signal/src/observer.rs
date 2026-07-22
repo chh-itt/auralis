@@ -41,3 +41,59 @@ pub(crate) struct ObserverState {
 thread_local! {
     pub(crate) static OBSERVER: RefCell<Option<ObserverState>> = const { RefCell::new(None) };
 }
+
+// ── Public API for UI frameworks ──────────────────────────────────────
+
+/// A guard that uninstalls the active observer when dropped.
+///
+/// Created by [`install_observer`].  While this guard is alive, every
+/// [`Signal::read`](crate::Signal::read) / [`Signal::with`](crate::Signal::with)
+/// call auto-subscribes the element (or other consumer) to that signal.
+pub struct ObserverGuard {
+    _private: (),
+}
+
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        OBSERVER.with(|o| {
+            *o.borrow_mut() = None;
+        });
+    }
+}
+
+/// Install an observer that auto-subscribes to all signals read during
+/// its lifetime.
+///
+/// `dirty_callback` is called (with no arguments) whenever any observed
+/// signal changes.  `on_subscribe` receives the signal's `state_addr`
+/// (`usize`) and a cleanup closure; store these to unsubscribe when the
+/// consumer (e.g.  a widget [`Element`]) is removed.
+///
+/// Returns an [`ObserverGuard`] that uninstalls the observer on drop.
+pub fn install_observer(
+    dirty_callback: Rc<dyn Fn()>,
+    on_subscribe: Rc<dyn Fn(usize, Box<dyn FnOnce()>)>,
+) -> ObserverGuard {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    let seen: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(HashSet::new()));
+    let re_read: Rc<RefCell<HashSet<SignalKey>>> = Rc::new(RefCell::new(HashSet::new()));
+
+    let on_sub = on_subscribe;
+    let state = ObserverState {
+        dirty_callback,
+        on_subscribe: Rc::new(move |key: SignalKey, cleanup: Box<dyn FnOnce()>| {
+            on_sub(key.addr(), cleanup);
+        }),
+        seen,
+        re_read,
+    };
+
+    OBSERVER.with(|o| {
+        *o.borrow_mut() = Some(state);
+    });
+
+    ObserverGuard { _private: () }
+}

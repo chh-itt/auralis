@@ -48,11 +48,11 @@ mod debug;
 #[cfg(feature = "debug")]
 pub use debug::{dump_reactive_graph, dump_task_tree};
 pub use executor::{
-    drain_deferred_signal_callbacks, has_flush_scheduler, init_flush_scheduler, init_time_source,
-    remove_panic_hook, reset_executor_for_test, schedule_callback, set_deferred,
-    set_global_max_deferred_callbacks, set_global_time_budget, set_panic_hook, spawn_global,
-    spawn_global_with_priority, with_executor, yield_now, Executor, PanicInfo, ScheduleFlush,
-    TimeSource, YieldNow,
+    drain_deferred_signal_callbacks, flush_all, has_flush_scheduler, init_flush_scheduler,
+    init_time_source, next_timer_delay_ms, remove_panic_hook, reset_executor_for_test,
+    schedule_callback, set_deferred, set_global_max_deferred_callbacks, set_global_time_budget,
+    set_panic_hook, spawn_global, spawn_global_with_priority, with_executor, yield_now, Executor,
+    PanicInfo, ScheduleFlush, TimeSource, YieldNow,
 };
 #[cfg(test)]
 pub use executor::{TestScheduleFlush, TestTimeSource};

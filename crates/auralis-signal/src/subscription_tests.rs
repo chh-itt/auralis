@@ -57,3 +57,80 @@ fn debug_format() {
     assert!(format!("{handle:?}").contains("SubscriptionHandle"));
     drop(handle);
 }
+
+// ── Weak derived subscriptions (self-unsubscribing) ────────────────────
+
+use crate::subscription::subscribe_derived;
+
+#[test]
+fn derived_subscription_updates_target_while_alive() {
+    crate::install_schedule_hook(Box::new(|f| f()));
+    let source = Signal::new(1);
+    let target = Signal::new(String::new());
+    subscribe_derived(&source, &target, |t| t.set("changed".to_string()));
+    source.set(2);
+    assert_eq!(target.read(), "changed");
+}
+
+#[test]
+fn derived_subscription_self_unsubscribes_when_target_dropped() {
+    crate::install_schedule_hook(Box::new(|f| f()));
+    let source = Signal::new(1);
+    let target = Signal::new(0u32);
+    subscribe_derived(&source, &target, |t| t.set(t.read_untracked() + 1));
+    assert_eq!(source.subscriber_count(), 1);
+
+    source.set(2);
+    assert_eq!(target.read(), 1);
+
+    drop(target);
+    // First notification after target death: callback sees a dead weak,
+    // unsubscribes itself.
+    source.set(3);
+    assert_eq!(source.subscriber_count(), 0);
+    // Subsequent sets stay at zero (no ghost callbacks).
+    source.set(4);
+    assert_eq!(source.subscriber_count(), 0);
+}
+
+#[test]
+fn derived_subscription_does_not_keep_target_alive() {
+    crate::install_schedule_hook(Box::new(|f| f()));
+    let source = Signal::new(1);
+    let target = Signal::new(0u32);
+    let weak_probe = target.downgrade();
+    subscribe_derived(&source, &target, |t| t.set(t.read_untracked() + 1));
+    drop(target);
+    // The subscription must hold only a weak ref — target must be dead now.
+    assert!(weak_probe.upgrade().is_none());
+}
+
+#[test]
+fn derived_subscription_shared_target_stays_alive_until_last_clone() {
+    crate::install_schedule_hook(Box::new(|f| f()));
+    let source = Signal::new(1);
+    let target = Signal::new(0u32);
+    let second_owner = target.clone();
+    subscribe_derived(&source, &target, |t| t.set(t.read_untracked() + 1));
+
+    drop(target);
+    // A clone still owns the target — updates must continue.
+    source.set(2);
+    assert_eq!(second_owner.read(), 1);
+    assert_eq!(source.subscriber_count(), 1);
+
+    drop(second_owner);
+    source.set(3);
+    assert_eq!(source.subscriber_count(), 0);
+}
+
+#[test]
+fn weak_signal_upgrade_roundtrip() {
+    let sig = Signal::new(42);
+    let weak = sig.downgrade();
+    let strong = weak.upgrade().expect("signal alive");
+    assert_eq!(strong.read_untracked(), 42);
+    drop(strong);
+    drop(sig);
+    assert!(weak.upgrade().is_none());
+}

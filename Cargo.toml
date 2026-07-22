@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/chh-itt/auralis"
@@ -15,9 +15,9 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 # Internal
-auralis-signal  = { path = "crates/auralis-signal", version = "0.1.17" }
-auralis-task    = { path = "crates/auralis-task", version = "0.1.17" }
-auralis-devtools = { path = "crates/auralis-devtools", version = "0.1.17" }
+auralis-signal  = { path = "crates/auralis-signal", version = "0.1.18" }
+auralis-task    = { path = "crates/auralis-task", version = "0.1.18" }
+auralis-devtools = { path = "crates/auralis-devtools", version = "0.1.18" }
 
 [profile.release]
 opt-level     = "s"
