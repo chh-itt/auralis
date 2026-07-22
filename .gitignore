@@ -1,6 +1,3 @@
 /target
 Cargo.lock
-.claude/
 examples/*/dist
-
-crates/auralis-ui
