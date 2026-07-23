@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 
-Two core crates, zero platform dependencies. `Signal<T>` and `Memo<T>` track
+Three crates, zero platform dependencies. `Signal<T>` and `Memo<T>` track
 dependencies at runtime. `TaskScope` manages task lifecycle through ownership.
 
 ---

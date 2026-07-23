@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 
-两个核心 crate，零平台依赖。`Signal<T>` 和 `Memo<T>` 在运行时追踪依赖。
+三个 crate，零平台依赖。`Signal<T>` 和 `Memo<T>` 在运行时追踪依赖。
 `TaskScope` 通过所有权管理任务生命周期。
 
 ---
