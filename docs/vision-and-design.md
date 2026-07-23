@@ -2,10 +2,11 @@
 
 ## What Auralis Is
 
-Auralis is an **async-first reactive kernel** distilled to two minimal crates:
+Auralis is an **async-first reactive kernel** in three crates:
 
 - `auralis-signal`: `Signal<T>` + `Memo<T>` — zero dependencies
 - `auralis-task`: `TaskScope` + priority executor — depends only on `auralis-signal`
+- `auralis-devtools`: diagnostic tooling — `ReactiveSnapshot`, `diff_snapshots()`, `ChangeStream`, CLI
 
 The core idea in one line:
 
@@ -13,15 +14,14 @@ The core idea in one line:
 
 ## Why It Exists
 
-Traditional reactive programming demands learning a new vocabulary — effects,
-cleanups, derived-state graphs, scheduler ticks. Auralis reduces these to
-concepts Rust developers already know:
+Auralis builds on concepts Rust developers already know, rather than
+introducing a separate reactive runtime vocabulary:
 
 - **`await signal.changed()`** — the task suspends until the value changes
 - **`TaskScope` owns tasks** — dropping a scope cancels everything inside it
 - **Events / timers / fetch are futures** — compose with `select!`, `join!`
 
-No `on_cleanup` hooks, no manual cancel tokens, no "effect system." Just async
+No separate effect system, no manual cancel tokens. Just async
 Rust — with cooperative `timer::sleep` for delays.
 
 ## Use Cases
@@ -76,7 +76,7 @@ virtual scrolling), causing memory leaks and degraded performance.
 
 **What about multi-threaded scenarios?**
 
-Auralis's escape hatch is **instance isolation**, not shared mutable state:
+Auralis chooses instance isolation over shared mutable state:
 
 ```rust
 // Independent Executor per thread / per request
@@ -91,10 +91,7 @@ Erlang's lightweight process + message-passing model.
 
 For simpler use-cases (e.g. a worker thread feeding data to a signal),
 an `std::sync::mpsc` channel + drain loop is six lines of code — see
-`examples/multi_thread_bridge.rs` in `auralis-task`.
-
-**We will not** replace `Rc` with `Arc` or `RefCell` with `Mutex` — that
-would sacrifice real performance for the appearance of generality.
+`examples/multi_thread_bridge.rs` in `auralis-task`. 
 
 ### 4. Memo Lazy Evaluation + Single Compute
 
@@ -127,6 +124,36 @@ overflow on deeply nested trees (200+ levels).
 
 `CallbackHandle`s are dropped before tasks, ensuring signal subscriptions
 are removed before any task-affecting cleanup.
+
+### 7. Built-in Observability (`auralis-devtools`)
+
+Auralis ships with a diagnostics crate that makes the entire reactive system
+visible at runtime — not through external profilers or debugger hacks, but
+through first-class APIs built on the same signal infrastructure.
+
+**`ReactiveSnapshot`** dumps every live signal, memo, and dependency edge as
+structured JSON. No instrumentation needed — the reactive node registry (behind
+the `diagnostics` feature) already tracks every node at creation.
+
+**`diff_snapshots()`** compares two snapshots and shows exactly what changed
+between frames: which signals mutated, which memos recomputed, which dependency
+edges were added or removed. This turns a reactive black box into a diffable
+audit trail.
+
+**`ChangeStream`** delivers real-time mutation events through an mpsc channel.
+Attach a consumer, and you see every `Signal::set()` as it happens — label,
+old value, new value, timestamp.
+
+**Why:** Reactive systems fail silently. A signal changes, a memo doesn't
+recompute, and you don't know why because the dependency graph is invisible.
+The `diff_snapshots` + `ChangeStream` pair gives you a before-and-after view
+of every frame. Combined with Burin's DevTools panel, this means you can
+inspect a running GUI's reactive state without adding a single log line.
+
+This isn't a debugging afterthought bolted onto the kernel. The reactive node
+registry, schedule observers, and label system are wired into `Signal::new`
+and `Memo::new` at the lowest level. DevTools is the visible surface of an
+architecture that was designed to be observed from day one.
 
 ## What We Don't Do
 

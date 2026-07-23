@@ -1,6 +1,6 @@
 # Auralis
 
-**An async-first reactive kernel for Rust: `Signal<T>` + `TaskScope`.**
+**A reactive kernel for Rust — `Signal<T>` + `TaskScope`.**
 
 *[中文版](README_zh-CN.md)*
 
@@ -8,24 +8,16 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 
-Three crates, zero platform dependencies, one idea: **reactive = pausable
-async tasks; lifecycle = ownership + structured concurrency.**
+Two core crates, zero platform dependencies. `Signal<T>` and `Memo<T>` track
+dependencies at runtime. `TaskScope` manages task lifecycle through ownership.
 
 ---
-
-## Crates
-
-| Crate | Role | Dependencies |
-|---|---|---|
-| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, `memo!` macro, batch updates, change-detection futures | **zero** |
-| `auralis-task` | `TaskScope`, priority executor, `timer::sleep`, cancellation, context DI, panic hook | `auralis-signal` |
-| `auralis-devtools` | `ReactiveSnapshot`, `snapshot()`, `diff_snapshots()`, `ChangeStream`, `Timeline`, CLI | `auralis-signal`, `auralis-task` |
 
 ## Quick Start
 
 ```rust
 use auralis_signal::{Signal, Memo, batch};
-use auralis_task::{TaskScope, set_global_time_budget};
+use auralis_task::TaskScope;
 
 // ---- Signal ----
 let count = Signal::new(0);
@@ -38,125 +30,107 @@ let b = Signal::new(3);
 let sum = Memo::new(move || a.read() + b.read());
 assert_eq!(sum.read(), 5);
 
-// ---- SignalMap (lightweight read-only projection) ----
-let names = Signal::new(vec!["alice", "bob"]);
-let len = names.map(|v: &Vec<&str>| v.len());
-assert_eq!(len.read(), 2);
-
-// ---- Batch (multiple sets, one notification) ----
-let x = Signal::new(0);
-batch(|| {
-    x.set(1);
-    x.set(2);
-    x.set(3);
-});
-assert_eq!(x.read(), 3);
-
-// ---- Signal::update (in-place mutation, zero clone) ----
+// ---- Signal::update (in-place mutation) ----
 let items = Signal::new(vec![1, 2]);
 items.update(|v| v.push(3));
-assert_eq!(items.read(), vec![1, 2, 3]);
 
-// ---- Signal::read_untracked (read without subscribing) ----
-let config = Signal::new("dark_mode");
-let _mode = config.read_untracked(); // won't trigger re-computation
+// ---- Batch (multiple sets, one notification) ----
+batch(|| { x.set(1); x.set(2); });
 
 // ---- TaskScope (structured concurrency) ----
 let scope = TaskScope::new();
 let c = count.clone();
-let handle = scope.spawn(async move {
-    loop {
-        let val = c.changed().await;
-        println!("count → {val}");
-    }
+scope.spawn(async move {
+    loop { c.changed().await; println!("count → {}", c.read()); }
 });
-handle.cancel(); // cancel a single task, or drop scope to cancel all
-scope.on_cleanup(|| println!("scope dropped"));
-
-// ---- watch_effect (auto-tracking side effect) ----
-scope.watch_effect(|| {
-    println!("sum = {}", sum.read());
-});
-drop(scope); // cancels all spawned tasks + runs cleanup
+drop(scope); // cancels everything inside
 ```
 
-## Why
+---
 
-Reactive programming has historically meant learning a new runtime
-vocabulary — effects, cleanups, derived-state graphs, scheduler ticks.
-Auralis reduces it to things Rust programmers already know:
+## What It Is
 
-- **await a signal** — the task suspends until the value changes
-- **scope owns tasks** — dropping the scope cancels everything inside
-- **events / timers / fetch are futures** — compose with `select!`, `join!`
+Auralis is a reactive kernel, not a framework. It makes three explicit trade-offs
+that keep the codebase under ~3,000 lines per crate：
 
-No manual cancel tokens, no "effect system." Just async Rust.
+**No reactive graph.** Each signal has a flat subscriber list and a monotonic
+version number. No topological propagation, no Clean/Check/Dirty state machine.
+The cost: two effects reading the same dirty memo might each trigger a
+recomputation.
 
-## Design bet
+**No arena allocation.** `Rc<RefCell<>>` uniformly. No `Copy` signals, no arena
+lifetimes. The cost: reference-counting overhead on every read and clone.
 
-Auralis is a reactive kernel, not a framework. It sacrifices three things
-that full reactive frameworks need:
+**No multi-threaded storage.** Single-threaded by design (`!Send + !Sync`).
+For multi-threaded scenarios, spin up isolated executor instances per request
+or per thread — channels bridge the gap. The cost: you manage the isolation
+boundaries yourself.
 
-- **No reactive graph.** Each signal has a flat subscriber list and a
-  monotonic version number. No topological propagation, no Clean/Check/Dirty
-  state machine. The tradeoff: two effects reading the same dirty memo
-  might each trigger recomputation.
-- **No arena allocation.** `Rc<RefCell<>>` uniformly. No `Copy` signals, no
-  arena lifetimes. The tradeoff: reference-counting overhead on every read
-  and clone.
-- **No multi-threaded storage backend.** Single-threaded by design
-  (`!Send + !Sync`). For multi-threaded SSR, spin up isolated executors
-  per request.
+What you get: `#![forbid(unsafe_code)]` everywhere, zero dependencies for
+`auralis-signal`, and a codebase you can read in an afternoon. No effect system.
+No scheduler vocabulary. Just `Signal::read()` auto-subscribes, `Signal::set()`
+auto-notifies. Tasks own their lifecycle through `TaskScope`.
 
-What you get: three crates (1,296 lines signal, 1,819 lines task
-runtime, 663 lines DevTools — pure Rust, excluding comments/tests),
-zero dependencies for the signal crate, `#![forbid(unsafe_code)]`. The signal layer fits in your head
-after one coffee. If you need to debug why an effect didn't fire, you
-step through a flat subscriber list, not a graph.
+---
+
+## Crates
+
+| Crate | Role | Size | Dependencies |
+|---|---|---|---|
+| `auralis-signal` | `Signal<T>`, `Memo<T>`, `SignalMap`, batch updates, change-detection futures | ~2,700 lines | **zero** |
+| `auralis-task` | `TaskScope`, priority executor, `timer::sleep`, cancellation, context DI | ~3,000 lines | `auralis-signal` |
+| `auralis-devtools` | `ReactiveSnapshot`, `diff_snapshots()`, `ChangeStream`, CLI | ~1,100 lines | `auralis-signal`, `auralis-task` |
+
+---
+
+## Used By
+
+**[Burin](https://github.com/chh-itt/burin)** — a retained-mode Rust GUI
+framework with 60 built-in widgets, dual GPU/CPU rendering backend, incremental
+Taffy layout, and full-frame headless testing. Auralis powers Burin's entire
+reactive pipeline：`Signal::set()` → `register_dirty` → incremental layout →
+subtree cache → paint → GPU.
+
+---
 
 ## Key Properties
 
 **Safety**
-
-- `#![forbid(unsafe_code)]` in all crates, `#![warn(clippy::all, clippy::pedantic)]`
-- Panic-safe `Memo` — old subscriptions survive a panicked recompute
+- `#![forbid(unsafe_code)]` in all crates
+- Panic-safe `Memo` — old subscriptions survive a panicked recompute, recover on next `read()`
 - Panic-safe `batch` — `BatchGuard` RAII restores state on unwind
 - Panic-safe cleanup — `CallbackHandle::drop` is `catch_unwind`-isolated
-- Memo cycle detection — thread-local depth guard
-- Iterative scope cancellation — BFS leaf-to-root, no stack overflow at 200+ levels
+- Memo cycle detection via thread-local depth guard
+- Iterative scope cancellation (BFS leaf-to-root), no stack overflow at 200+ levels
 
 **Performance**
-
-- Zero-dependency signal crate
-- Single-threaded by design (`!Send` / `!Sync`)
+- Zero-dependency signal crate; single-threaded by design (`!Send` / `!Sync`)
 - Configurable time budget — `set_global_time_budget(ms)`
 - Proactive waker deregistration — no stale-waker accumulation
 - `Signal::update()` — in-place mutation without cloning
 
 **Diagnostics**
-
 - `ReactiveSnapshot` — dump every signal, memo, and dependency edge as JSON
 - `diff_snapshots()` — see exactly what changed between two frames
 - `DerivationNode` tree — data-flow graph in React DevTools style
 - `ChangeStream` — real-time change events via observer hooks
-- `CLI` — `auralis-devtools dump|stream|serve`
-- Labels on `Signal`, `Memo`, and `TaskScope` for readable output
-- Panic hook — `set_panic_hook()` to observe task failures
+- CLI — `auralis-devtools dump | stream | serve`
+- Labels on `Signal`, `Memo`, `TaskScope` for readable output
+- `set_panic_hook()` to observe task failures
 - Schedule observers — passive hooks on every signal mutation
 
 **Ergonomics**
-
-- `JoinHandle` from `spawn()` — cancel or check individual tasks
+- `spawn()` returns `JoinHandle` — cancel or check individual tasks
 - `watch` / `watch_effect` — auto-tracking side effects
 - `Memo<T>` — lazy computed value with automatic dependency tracking
 - `SignalMap<T,U,F>` — lightweight read-only projection
 
+---
+
 ## Multi-threading
 
 `Signal<T>` and `TaskScope` are `!Send + !Sync` by design — they live on the
-executor thread.  For cross-thread communication, bridge via a standard
-channel: the worker thread owns the `Sender` (which *is* `Send`), and the
-host thread drains the `Receiver` into `sig.set()`.
+executor thread. For cross-thread communication, bridge via a standard channel：
 
 ```rust
 use std::sync::mpsc;
@@ -166,117 +140,52 @@ let sig = Signal::new(0i32);
 let (tx, rx) = mpsc::channel();
 
 thread::spawn(move || { tx.send(42).unwrap(); });
-
 for msg in rx { sig.set(msg); }
 assert_eq!(sig.read(), 42);
 ```
 
 For multi-request SSR isolation (Tokio), each request gets its own
-`Executor::new_instance()` + `TaskScope`, wrapped via `with_executor`.
-Enable the `ssr-tokio` feature for per-task scope storage.
+`Executor::new_instance()` + `TaskScope`. Enable `ssr-tokio` for per-task scope
+storage. See `crates/auralis-task/examples/multi_thread_bridge.rs` for more
+patterns.
 
-See `crates/auralis-task/examples/multi_thread_bridge.rs` for more patterns
-(multiple producers, oneshot results).
-
-## Tokio Integration
-
-Auralis is runtime-agnostic, but pairs naturally with Tokio for SSR.
-**Tokio handles I/O** (network, DB, timers) and feeds results into signals.
-**Auralis handles the reactive cascade** — signals → memos → effects →
-rendered output.  The boundary is a single `signal.set()`.
-
-```rust
-use auralis_signal::Signal;
-use auralis_task::{Executor, TaskScope, with_executor};
-
-// Per-request: Tokio fetches data, Auralis renders.
-let ex = Executor::new_instance();
-let scope = TaskScope::with_executor(&ex);
-let data = Signal::new(None::<Json>);
-
-// Reactive effect: re-render on every data change.
-scope.spawn(async move {
-    loop { data.changed().await; render(data.read()); }
-});
-
-// Tokio I/O → signal → reactive cascade →
-// Executor::flush_instance(&ex) → output ready.
-let json = reqwest::get(url).await?.json().await?;
-with_executor(&ex, || data.set(Some(json)));
-Executor::flush_instance(&ex);
-
-// Drop scope → all reactive state cleaned up. No manual tokens.
-drop(scope);
-```
-
-For per-task scope storage with Tokio (required for `current_scope()`
-inside spawned tasks), enable the `ssr-tokio` feature and call
-`init_scope_store_tokio()` once at startup.
-
-See `demos/tokio-ssr/` for a runnable demo with concurrent requests.
-
-## Workspace Structure
-
-```
-crates/
-  auralis-signal/        # Signal<T>, Memo<T>, SignalMap<T,U,F>, batch(), futures
-  auralis-task/          # TaskScope tree, executor, timer, context DI
-  auralis-devtools/      # JSON snapshots, diff, change stream, CLI
-demos/
-  egui-demo/             # Auralis vs plain egui comparison
-  wasm-counter/          # Wasm reactive counter
-  cli-multitask/         # CLI multi-task with Ctrl+C cancellation
-  leptos-devtools-demo/  # Leptos Todo Dashboard + Auralis DevTools
-docs/
-  vision-and-design.md   # Design philosophy
-  architecture.md        # Architecture & module design
-```
-
-See [chh-itt/xilem](https://github.com/chh-itt/xilem) `auralis-experiment` branch
-for the Xilem integration layer (`xilem_core_auralis`).
+---
 
 ## Feature Flags
 
 | Feature | Crate | Enables |
 |---------|-------|---------|
-| `debug` | `auralis-task` | `dump_reactive_graph()` — signals, memos, and tasks in one snapshot; also enables `auralis-signal/diagnostics` |
+| `debug` | `auralis-task` | `dump_reactive_graph()` — signals, memos, and tasks in one snapshot |
 | `diagnostics` | `auralis-signal` | Reactive node registry, `ReactiveNodeSnapshot`, `dump_registry()` |
 | `ssr-tokio` | `auralis-task` | Tokio task-local storage for multi-request SSR |
 | `ws-transport` | `auralis-devtools` | WebSocket server (`serve` command) via `tungstenite` |
 
+---
+
 ## Running
 
 ```bash
-# All tests
 cargo test --all
-
-# Specific crate
 cargo test -p auralis-signal
 cargo test -p auralis-task
 cargo test -p auralis-devtools
 
-# Linting
 cargo clippy --all-targets --all-features
 
-# Benchmarks
 cargo run --example signal_bench --release -p auralis-signal
 cargo run --example scope_bench --release -p auralis-task
 
-# Examples
-cargo run --example counter
-cargo run --example multi_thread_bridge -p auralis-task
-cargo run --example multi_instance_isolated -p auralis-task
-
-# DevTools CLI
 cargo run -p auralis-devtools -- dump
-
-# Docs
 cargo doc --open
 ```
+
+---
 
 ## Minimum Supported Rust Version
 
 Rust 1.80+
+
+---
 
 ## License
 
